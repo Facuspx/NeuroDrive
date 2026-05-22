@@ -1,0 +1,258 @@
+# =============================================================================
+# NeuroDrive - Configuración global del sistema
+# =============================================================================
+# Este archivo centraliza TODOS los umbrales y parámetros ajustables.
+#
+# Convenciones:
+#   - Tiempos en segundos (sufijo _seg)
+#   - Ángulos en grados (sufijo _grados)
+#   - Frecuencias en hertz o por minuto según contexto
+#   - Pines GPIO según numeración BCM (no física)
+# =============================================================================
+
+
+# -----------------------------------------------------------------------------
+# Máquina de estados finita (FSM)
+# -----------------------------------------------------------------------------
+fsm:
+  # Ventana corta: análisis de eventos recientes para escalada rápida
+  ventana_corta_seg: 60
+
+  # Ventana larga: análisis de tendencia para detectar fatiga sostenida
+  ventana_larga_seg: 300
+
+  # Tiempo mínimo sin eventos para considerar bajar de estado (histéresis)
+  tiempo_para_bajar_estado_seg: 60
+
+  # Cantidad de microsueños en ventana corta para escalar a ALERTA_MEDIA
+  max_microsuenos_ventana_corta: 1
+
+  # Cantidad de bostezos en ventana corta para considerar advertencia
+  max_bostezos_ventana_corta: 3
+
+  # Cantidad de cabeceos en ventana corta para escalar
+  max_cabeceos_ventana_corta: 1
+
+
+# -----------------------------------------------------------------------------
+# Captura de video y detección facial
+# -----------------------------------------------------------------------------
+vision:
+  # FPS deseado del pipeline de visión (la Pi 5 soporta 15-30 cómodo)
+  fps_deseado: 15
+
+  # Resolución de captura. Más baja = más rápido pero menos preciso
+  resolucion_ancho: 640
+  resolucion_alto: 480
+
+  # Índice de cámara (normalmente 0). Cambiar si hay múltiples cámaras
+  indice_camara: 0
+
+  # MediaPipe FaceMesh
+  confianza_minima_deteccion: 0.5
+  confianza_minima_seguimiento: 0.5
+  refinar_contornos: true  # Mejora precisión EAR/MAR (+10-15% CPU)
+
+  # Cuántos frames consecutivos sin detección antes de declarar "rostro perdido"
+  max_frames_sin_rostro: 15
+
+
+# -----------------------------------------------------------------------------
+# Análisis de ojos (EAR, parpadeos, microsueños)
+# -----------------------------------------------------------------------------
+ojos:
+  # Umbrales con histéresis para evitar parpadeo del estado
+  umbral_ear_cerrar: 0.18      # Por debajo de esto, ojo se considera cerrado
+  umbral_ear_abrir: 0.22       # Por encima de esto, ojo se considera abierto
+
+  # Duración mínima/máxima de un parpadeo normal (segundos)
+  dur_min_parpadeo_seg: 0.10
+  dur_max_parpadeo_seg: 0.40
+
+  # Duración mínima para clasificar como microsueño (crítico)
+  dur_min_microsueno_seg: 1.5
+
+  # Período refractario entre parpadeos (evita doble conteo)
+  refractario_parpadeo_seg: 0.25
+
+  # Frecuencia esperada de parpadeos por minuto
+  parpadeos_por_minuto_normal: 17    # rango: 15-20 según literatura
+  parpadeos_por_minuto_alerta: 10    # por debajo de esto sostenido = alerta
+
+  # Tiempo sostenido bajo el umbral para gatillar alerta
+  tiempo_parpadeos_bajos_seg: 30
+
+  # Suavizado exponencial del EAR (alpha 0=sin filtro, 0.99=muy suave)
+  alpha_suavizado_ear: 0.5
+
+
+# -----------------------------------------------------------------------------
+# Análisis de boca (MAR, bostezos)
+# -----------------------------------------------------------------------------
+boca:
+  # MAR (Mouth Aspect Ratio) por encima del cual se considera abierta
+  umbral_mar_bostezo: 0.6
+
+  # Duración mínima de apertura para clasificar como bostezo (no hablar)
+  dur_min_bostezo_seg: 1.0
+
+  # Ventana larga para contar bostezos (15 minutos)
+  ventana_bostezos_seg: 900
+
+  # Cantidad de bostezos en esa ventana para considerar somnolencia
+  max_bostezos_ventana_larga: 3
+
+
+# -----------------------------------------------------------------------------
+# Análisis de cabeza (cabeceo con ángulos de Euler)
+# -----------------------------------------------------------------------------
+cabeza:
+  # Pitch positivo = cabeza hacia abajo. Umbral en grados.
+  umbral_pitch_grados: 20
+
+  # Duración mínima sostenida del cabeceo para contarlo (segundos)
+  dur_min_cabeceo_seg: 0.8
+
+  # Tiempo de calibración inicial para baseline neutro (segundos)
+  tiempo_calibracion_baseline_seg: 5
+
+  # Yaw máximo permitido sin invalidar análisis de pitch (cabeza girada)
+  umbral_yaw_max_grados: 35
+
+
+# -----------------------------------------------------------------------------
+# Wearable (pulsera ESP32-S3)
+# -----------------------------------------------------------------------------
+wearable:
+  # Rango de BPM considerado normal en reposo/conducción
+  bpm_normal_min: 60
+  bpm_normal_max: 100
+
+  # Umbrales para clasificar riesgo
+  bpm_umbral_alerta: 70        # Por debajo, riesgo medio
+  bpm_umbral_critico: 60       # Por debajo, riesgo alto
+
+  # Timeouts para ACK del conductor según nivel de alerta
+  timeout_ack_leve_seg: 30
+  timeout_ack_medio_seg: 20
+  timeout_ack_critico_seg: 15
+
+  # Heartbeat implícito: tiempo máximo sin recibir BPM antes de declarar caída
+  timeout_heartbeat_seg: 10
+
+  # Intervalo nominal entre paquetes de BPM enviados por el ESP32
+  intervalo_envio_bpm_seg: 2.0
+
+
+# -----------------------------------------------------------------------------
+# IPC (Inter-Process Communication)
+# -----------------------------------------------------------------------------
+ipc:
+  # Modo de comunicación entre módulos externos y el Core
+
+  modo: "posix_mq"
+
+  # Nombres de las colas POSIX (deben empezar con /)
+  cola_vision: "/neurodrive_vision"
+  cola_wearable: "/neurodrive_wearable"
+
+  # Capacidad de cada cola (cantidad de mensajes en buffer)
+  capacidad_cola: 16
+
+  # Tamaño máximo de mensaje en bytes (para POSIX MQ)
+  tamano_max_mensaje_bytes: 1024
+
+
+# -----------------------------------------------------------------------------
+# Red (Tramo 3: UDP con el wearable)
+# -----------------------------------------------------------------------------
+red:
+  # IP del wearable en la red local del vehículo
+  ip_wearable: "192.168.4.20"
+
+  # IP de la Raspberry (escucha de paquetes del wearable)
+  ip_raspberry: "0.0.0.0"
+
+  # Puerto UDP para recibir datos del wearable
+  puerto_udp_escucha: 5005
+
+  # Puerto UDP del wearable (al que enviamos comandos)
+  puerto_udp_envio: 5006
+
+  # Para comandos críticos: cuántas veces se reenvía el mismo paquete
+  reenvios_comandos_criticos: 3
+
+  # Espaciado entre reenvíos (ms)
+  espaciado_reenvios_ms: 50
+
+
+# -----------------------------------------------------------------------------
+# Identificadores de dispositivos y sesiones
+# -----------------------------------------------------------------------------
+identificadores:
+  # ID del módulo de visión (útil cuando hay múltiples cámaras)
+  id_camara: "cam-01"
+
+  # ID del wearable (útil cuando hay múltiples pulseras)
+  id_wearable: "wearable-01"
+
+  # ID del proceso Core (siempre fijo, hay uno solo)
+  id_core: "core"
+
+  # Prefijo para los IDs de sesión generados al arranque
+  # Formato resultante: "ses-YYYYMMDD-HHMMSS"
+  prefijo_sesion: "ses"
+
+  # Prefijos para los IDs de mensajes según el origen
+  prefijo_mensaje_vision: "vis"
+  prefijo_mensaje_wearable: "wea"
+  prefijo_mensaje_interno: "int"
+
+
+# -----------------------------------------------------------------------------
+# Actuadores (GPIO y voz)
+# -----------------------------------------------------------------------------
+actuadores:
+  # Pin GPIO del buzzer (numeración BCM)
+  buzzer_gpio_pin: 18
+
+  # Habilitar síntesis de voz (Rol A del asistente Neuro)
+  habilitar_voz: true
+
+  # Carpeta donde están los .wav pregrabados (opcional, alternativa a TTS)
+  ruta_audios_predefinidos: "Neuro_voz/audios/"
+
+
+# -----------------------------------------------------------------------------
+# Logging y persistencia
+# -----------------------------------------------------------------------------
+logging:
+  # Nivel global: DEBUG, INFO, WARNING, ERROR, CRITICAL
+  nivel: "INFO"
+
+  # Carpeta donde se guardan los logs
+  ruta_logs: "NeuroDrive_Core/logs/"
+
+  # Tamaño máximo por archivo de log antes de rotar (bytes)
+  tamano_max_log_bytes: 10485760   # 10 MB
+
+  # Cantidad de archivos rotados que se mantienen
+  archivos_rotados: 5
+
+  # Habilitar CSV de sesión con eventos detallados (para análisis posterior)
+  habilitar_csv_sesion: true
+
+  # Carpeta donde se guardan los CSV
+  ruta_csv_sesion: "NeuroDrive_Core/sesiones/"
+
+
+# -----------------------------------------------------------------------------
+# Persistencia de estado entre sesiones
+# -----------------------------------------------------------------------------
+sesion:
+  # Archivo donde se guarda el estado al cerrar
+  archivo_estado: "NeuroDrive_Core/estado_sesion.json"
+
+  # Tiempo máximo para considerar que es la misma sesión (segundos)
+  # Si pasa más tiempo entre apagado y arranque, se resetea todo
+  ttl_sesion_seg: 900   # 15 minutos

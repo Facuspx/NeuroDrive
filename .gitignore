@@ -1,0 +1,21 @@
+# Entornos virtuales (Evita subir megabytes de librerias instaladas)
+.venv/
+venv/
+env/
+ENV/
+
+# Archivos temporales de ejecucion de Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Configuracion local de Visual Studio Code
+.vscode/
+
+# Archivos de variables de entorno y contrasenias (Seguridad)
+.env
+secrets.json
+
+# Archivos de datos o bases de datos locales (Opcional)
+*.db
+*.sqlite3
