@@ -1,0 +1,14 @@
+{
+  "exito": true,
+  "timestamp": 1779489226.8681362,
+  "ear_base": 0.26238326861913824,
+  "mar_base": 0.04892693695834385,
+  "pitch_neutro": -14.752656591947215,
+  "yaw_neutro": -5.4981850448127085,
+  "roll_neutro": -3.837262058658999,
+  "muestras_totales": 901,
+  "muestras_validas": 899,
+  "tasa_deteccion": 0.9977802441731409,
+  "duracion_real_seg": 59.98595993899971,
+  "motivo_fallo": ""
+}

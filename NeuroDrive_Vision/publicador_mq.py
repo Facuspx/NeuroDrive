@@ -154,6 +154,8 @@ class PublicadorMQ:
         id_dispositivo: Optional[str] = None,
         capacidad_cola: Optional[int] = None,
         forzar_simulado: bool = False,
+        drenar_al_iniciar: bool = True,
+        eliminar_al_detener: bool = True,
     ) -> None:
         """
         Parametros
@@ -169,10 +171,24 @@ class PublicadorMQ:
         forzar_simulado : bool
             Si True, opera en modo simulado aunque posix_ipc este disponible.
             Util para tests.
+        drenar_al_iniciar : bool
+            Si True (default), al iniciar vacia los mensajes viejos que hayan
+            quedado en la cola de una corrida anterior. Evita arrancar con
+            una cola "envenenada".
+        eliminar_al_detener : bool
+            Si True (default), al detener elimina la cola del kernel (unlink).
+            IMPORTANTE: las POSIX MQ persisten en el kernel hasta reiniciar
+            o hasta hacer unlink. Mientras el Core (el consumidor) no exista,
+            la vision es la duenia de la cola y debe eliminarla al cerrar,
+            sino la cola queda llena ocupando memoria del kernel.
+            Cuando se integre el Core, poner esto en False (el Core maneja
+            el ciclo de vida de la cola).
         """
         self.config = config
         self.nombre_cola = nombre_cola or self.NOMBRE_COLA_DEFAULT
         self.id_dispositivo = id_dispositivo or self.ID_DISPOSITIVO_DEFAULT
+        self.drenar_al_iniciar = bool(drenar_al_iniciar)
+        self.eliminar_al_detener = bool(eliminar_al_detener)
 
         if capacidad_cola is not None:
             if capacidad_cola < 1:
@@ -200,6 +216,7 @@ class PublicadorMQ:
         self._mensajes_enviados: int = 0
         self._mensajes_descartados: int = 0
         self._errores: int = 0
+        self._mensajes_drenados: int = 0  # cuantos viejos vaciamos al iniciar
 
     # ------------------------------------------------------------------
     # Propiedades de estado
@@ -231,9 +248,16 @@ class PublicadorMQ:
 
     def iniciar(self) -> None:
         """
-        Abre (o crea) la cola POSIX MQ.
+        Abre la cola POSIX MQ, recreandola limpia.
 
         Si esta en modo simulado, solo genera el id de sesion y marca activo.
+
+        IMPORTANTE sobre la cola: las POSIX MQ persisten en el kernel entre
+        ejecuciones. Si una corrida anterior dejo la cola llena (porque no
+        habia consumidor), la proxima arrancaria con la cola "envenenada".
+        Para evitarlo, al iniciar eliminamos cualquier cola preexistente con
+        este nombre y la creamos de cero. Asi siempre arrancamos limpios y
+        con la capacidad correcta.
         """
         if self._activo:
             _log.warning("PublicadorMQ ya estaba iniciado")
@@ -249,6 +273,7 @@ class PublicadorMQ:
         self._mensajes_enviados = 0
         self._mensajes_descartados = 0
         self._errores = 0
+        self._mensajes_drenados = 0
 
         if self.modo_simulado:
             motivo = []
@@ -265,7 +290,33 @@ class PublicadorMQ:
             self._activo = True
             return
 
-        # Modo real: abrir la cola
+        # ----- Modo real -----
+
+        # Paso 1: si pidieron drenar, eliminamos cualquier cola preexistente.
+        # Esto garantiza arrancar con una cola vacia y con la capacidad
+        # correcta (si la cola vieja tenia otra capacidad, posix_ipc la
+        # ignoraria al solo abrirla).
+        if self.drenar_al_iniciar:
+            try:
+                cola_vieja = posix_ipc.MessageQueue(self.nombre_cola)
+                # Contar cuantos mensajes viejos habia (solo informativo)
+                pendientes = cola_vieja.current_messages
+                cola_vieja.close()
+                posix_ipc.unlink_message_queue(self.nombre_cola)
+                if pendientes > 0:
+                    _log.warning(
+                        "Cola '%s' de una corrida anterior tenia %d mensajes. "
+                        "Eliminada para arrancar limpio.",
+                        self.nombre_cola, pendientes,
+                    )
+                self._mensajes_drenados = pendientes
+            except posix_ipc.ExistentialError:
+                # No existia cola previa: perfecto, nada que limpiar
+                pass
+            except Exception as e:
+                _log.warning("No se pudo limpiar la cola preexistente: %s", e)
+
+        # Paso 2: crear la cola nueva y limpia
         try:
             self._cola = posix_ipc.MessageQueue(
                 self.nombre_cola,
@@ -289,9 +340,13 @@ class PublicadorMQ:
         """
         Cierra la cola. Idempotente.
 
-        NOTA: cerramos la cola pero NO la desvinculamos (unlink). El Core
-        es el "duenio" de la cola; si la desvinculamos, romperiamos al Core.
-        Solo cerramos nuestro descriptor.
+        Si eliminar_al_detener es True (default mientras no exista el Core),
+        ademas elimina la cola del kernel con unlink. Esto es importante:
+        sin el unlink, la cola sobrevive a la ejecucion y, si quedo llena,
+        consume memoria del kernel hasta reiniciar la Pi.
+
+        Cuando se integre el Core, eliminar_al_detener debe ser False: el
+        Core es el duenio del ciclo de vida de la cola.
         """
         if self._cola is not None:
             try:
@@ -299,6 +354,17 @@ class PublicadorMQ:
             except Exception as e:
                 _log.warning("Error al cerrar la cola: %s", e)
             self._cola = None
+
+        # Eliminar la cola del kernel si corresponde
+        if (not self.modo_simulado) and self.eliminar_al_detener:
+            try:
+                posix_ipc.unlink_message_queue(self.nombre_cola)
+                _log.info("Cola '%s' eliminada del kernel", self.nombre_cola)
+            except posix_ipc.ExistentialError:
+                pass  # ya no existia
+            except Exception as e:
+                _log.warning("No se pudo eliminar la cola: %s", e)
+
         self._activo = False
         _log.info(
             "PublicadorMQ detenido (enviados=%d, descartados=%d, errores=%d)",
@@ -551,6 +617,7 @@ class PublicadorMQ:
             "id_sesion": self._id_sesion,
             "mensajes_enviados": self._mensajes_enviados,
             "mensajes_descartados": self._mensajes_descartados,
+            "mensajes_drenados": self._mensajes_drenados,
             "errores": self._errores,
             "numero_secuencia": self._numero_secuencia,
             "tasa_envio": round(tasa_envio, 3),

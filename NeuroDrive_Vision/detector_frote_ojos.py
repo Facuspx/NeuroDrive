@@ -106,6 +106,11 @@ class DatosFroteOjos:
     puntas_detectadas: list = field(default_factory=list)  # list[(x, y)]
     puntas_en_zona: list = field(default_factory=list)     # list[(x, y)]
 
+    # Landmarks completos de cada mano detectada: 21 puntos por mano.
+    # Estructura: list de manos, cada mano es list de 21 (x, y) en pixeles.
+    # Util para dibujar el esqueleto completo de la mano (ventana de malla).
+    landmarks_manos: list = field(default_factory=list)  # list[list[(x, y)]]
+
     def __repr__(self) -> str:
         if not self.valido:
             return f"DatosFroteOjos(invalido: {self.motivo_invalido})"
@@ -235,6 +240,8 @@ class DetectorFroteOjos:
         # maquina de estados de frote siga corriendo a frame completo.
         self._ultimas_puntas: list[Tuple[int, int]] = []
         self._ultimas_manos: int = 0
+        # Landmarks completos (21 por mano) de la ultima deteccion
+        self._ultimos_landmarks_manos: list[list[Tuple[int, int]]] = []
 
         # Cuando arranco el contacto actual (si lo hay)
         self._ts_inicio_contacto: Optional[float] = None
@@ -309,6 +316,7 @@ class DetectorFroteOjos:
         self._ultimo_resultado = None
         self._ultimas_puntas = []
         self._ultimas_manos = 0
+        self._ultimos_landmarks_manos = []
         self._ts_inicio_contacto = None
         self._frote_ya_emitido = False
         self._historial_frotes.clear()
@@ -460,26 +468,36 @@ class DetectorFroteOjos:
                 if resultado_hands.multi_hand_landmarks else 0
             )
 
-            # Lista de coordenadas de las 5 puntas de cada mano detectada
+            # Lista de coordenadas de las 5 puntas de cada mano detectada,
+            # y tambien los 21 landmarks completos de cada mano (para dibujar
+            # el esqueleto en la ventana de malla).
             puntas: list[Tuple[int, int]] = []
+            landmarks_manos: list[list[Tuple[int, int]]] = []
             if resultado_hands.multi_hand_landmarks:
                 for hand_lms in resultado_hands.multi_hand_landmarks:
+                    # Los 21 landmarks completos de esta mano
+                    mano_completa: list[Tuple[int, int]] = []
+                    for lm in hand_lms.landmark:
+                        px = int(np.clip(lm.x, 0.0, 1.0) * ancho)
+                        py = int(np.clip(lm.y, 0.0, 1.0) * alto)
+                        mano_completa.append((px, py))
+                    landmarks_manos.append(mano_completa)
+                    # Las 5 puntas (subconjunto, para la deteccion de frote)
                     for tip_idx in TIPS_DEDOS:
-                        if tip_idx < len(hand_lms.landmark):
-                            lm = hand_lms.landmark[tip_idx]
-                            px = int(np.clip(lm.x, 0.0, 1.0) * ancho)
-                            py = int(np.clip(lm.y, 0.0, 1.0) * alto)
-                            puntas.append((px, py))
+                        if tip_idx < len(mano_completa):
+                            puntas.append(mano_completa[tip_idx])
 
             # Guardar para reutilizar en frames saltados
             self._ultimas_puntas = puntas
             self._ultimas_manos = manos_detectadas
+            self._ultimos_landmarks_manos = landmarks_manos
         else:
             # Frame saltado: reutilizamos la ultima deteccion de Hands.
             # Las puntas pueden estar levemente desactualizadas (1 frame),
             # pero para frotes de varios segundos es irrelevante.
             puntas = self._ultimas_puntas
             manos_detectadas = self._ultimas_manos
+            landmarks_manos = self._ultimos_landmarks_manos
 
         # ============================================================
         # 3) Si no hay rostro, no podemos definir la region de ojos.
@@ -491,6 +509,7 @@ class DetectorFroteOjos:
                 manos_detectadas=manos_detectadas,
                 frote_en_curso=False,
                 puntas_detectadas=puntas,
+                landmarks_manos=landmarks_manos,
                 frotes_por_minuto=self._calcular_frotes_por_minuto(ts_frame),
                 tiempo_procesamiento_ms=(time.monotonic() - t0) * 1000.0,
                 motivo_invalido="rostro_ausente",
@@ -576,6 +595,7 @@ class DetectorFroteOjos:
             region_ojo_der=region_der,
             puntas_detectadas=puntas,
             puntas_en_zona=puntas_en_zona,
+            landmarks_manos=landmarks_manos,
         )
         self._ultimo_resultado = res
         return res
