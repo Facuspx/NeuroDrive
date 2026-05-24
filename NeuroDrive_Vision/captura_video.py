@@ -65,9 +65,27 @@ class CapturaVideo:
     Thread-safe: NO. Debe ser usada desde un solo hilo.
     """
 
-    # Resolucion de captura nativa (sensor completo, sin crop)
+    # Resolucion de captura nativa (sensor completo, sin crop).
+    # Segun 'rpicam-vid --list-cameras', el modo 1640x1232 del IMX219 usa
+    # crop (0,0)/3280x2464 = SENSOR COMPLETO. Es el unico modo (junto al
+    # 3280x2464, demasiado pesado) que no recorta el campo de vision.
+    # El modo 640x480 recorta a una ventana central de 1280x960 -> zoom
+    # excesivo, no sirve para distancias cortas en cabina.
     CAPTURA_ANCHO = 1640
     CAPTURA_ALTO = 1232
+
+    # Flip horizontal: la camara apunta al conductor, sin flip la imagen
+    # sale espejada (mover la cabeza a la derecha -> se ve a la izquierda).
+    HFLIP = True
+    VFLIP = False
+
+    # Balance de blancos para el sensor NoIR (sin filtro infrarrojo).
+    # El NoIR deja pasar el infrarrojo, lo que tine la imagen de rosa/magenta.
+    # El AWB automatico de rpicam-vid no compensa esto bien. Fijamos las
+    # ganancias de color manualmente (rojo, azul) para neutralizar el tinte.
+    # Valores tipicos para NoIR bajo luz interior; si el tinte persiste se
+    # ajustan: subir la primera reduce el rojo, subir la segunda reduce el azul.
+    AWB_GAINS = "1.8,1.8"
 
     # Tamano de lectura del pipe (64KB por chunk)
     CHUNK_SIZE = 65536
@@ -120,30 +138,54 @@ class CapturaVideo:
     # CICLO DE VIDA
     # ==================================================================
 
-    def iniciar(self) -> None:
+    def _construir_comando(self, con_flags_avanzados: bool) -> list:
         """
-        Lanza el subproceso rpicam-vid en modo MJPEG y prepara la captura.
+        Construye el comando rpicam-vid.
 
-        Raises:
-            ErrorCaptura: si rpicam-vid no esta disponible o falla al arrancar.
+        Parametros
+        ----------
+        con_flags_avanzados : bool
+            Si True, incluye --mode y los flags de balance de blancos.
+            Si False, usa solo los flags basicos (compatibilidad con
+            versiones viejas de rpicam-vid que no soportan --mode o
+            --awb custom).
         """
-        if self._activa:
-            _log.warning("iniciar() llamado pero captura ya activa")
-            return
-
         cmd = [
             "rpicam-vid",
-            "-t", "0",                                  # duracion infinita
+            "-t", "0",                                   # duracion infinita
             "--width", str(self.CAPTURA_ANCHO),          # sensor completo
             "--height", str(self.CAPTURA_ALTO),
             "--framerate", str(self.fps),
             "--codec", "mjpeg",                          # MJPEG confiable
             "--nopreview",                               # sin ventana de preview
-            "-o", "-",                                   # stdout
         ]
 
-        _log.info("Lanzando captura: %s", " ".join(cmd))
+        if con_flags_avanzados:
+            # --mode fuerza el modo de sensor exacto: garantiza que SIEMPRE
+            # use el modo de sensor completo 1640x1232 y nunca caiga al
+            # modo 640x480 (que recorta el campo). Formato: ancho:alto.
+            cmd[2:2] = ["--mode", f"{self.CAPTURA_ANCHO}:{self.CAPTURA_ALTO}"]
+            # Balance de blancos manual para neutralizar el tinte rosa del
+            # sensor NoIR (sin filtro infrarrojo).
+            cmd += ["--awb", "custom", "--awbgains", self.AWB_GAINS]
 
+        # Flip de imagen (espejado). hflip corrige el efecto espejo.
+        if self.HFLIP:
+            cmd.append("--hflip")
+        if self.VFLIP:
+            cmd.append("--vflip")
+
+        cmd += ["-o", "-"]  # salida a stdout
+        return cmd
+
+    def _intentar_arrancar(self, cmd: list) -> bool:
+        """
+        Lanza rpicam-vid con el comando dado y verifica que produzca frames.
+
+        Returns:
+            True si arranco bien y produce frames JPEG validos.
+            False si fallo (el proceso queda detenido).
+        """
         try:
             self._proceso = subprocess.Popen(
                 cmd,
@@ -160,19 +202,63 @@ class CapturaVideo:
             raise ErrorCaptura(f"Error lanzando rpicam-vid: {e}")
 
         # Esperar un poco y verificar que el proceso sigue corriendo
-        time.sleep(0.3)
+        time.sleep(0.5)
         if self._proceso.poll() is not None:
-            self.detener()
-            raise ErrorCaptura("rpicam-vid termino inmediatamente al arrancar")
+            # El proceso murio: probablemente un flag no soportado
+            self._proceso = None
+            return False
 
         # Leer un frame de prueba
         self._buffer = b""
         frame_prueba = self._leer_siguiente_jpeg()
         if frame_prueba is None:
-            self.detener()
-            raise ErrorCaptura(
-                "rpicam-vid no produjo frames MJPEG validos en el arranque"
+            try:
+                self._proceso.terminate()
+                self._proceso.wait(timeout=2.0)
+            except Exception:
+                pass
+            self._proceso = None
+            return False
+
+        return True
+
+    def iniciar(self) -> None:
+        """
+        Lanza el subproceso rpicam-vid en modo MJPEG y prepara la captura.
+
+        Intenta primero con los flags avanzados (--mode, balance de blancos
+        para el NoIR). Si esa version de rpicam-vid no los soporta y el
+        proceso falla, reintenta con flags basicos.
+
+        Raises:
+            ErrorCaptura: si rpicam-vid no esta disponible o falla incluso
+            con flags basicos.
+        """
+        if self._activa:
+            _log.warning("iniciar() llamado pero captura ya activa")
+            return
+
+        # Intento 1: con flags avanzados (--mode + balance de blancos NoIR)
+        cmd_avanzado = self._construir_comando(con_flags_avanzados=True)
+        _log.info("Lanzando captura (flags avanzados): %s", " ".join(cmd_avanzado))
+
+        if not self._intentar_arrancar(cmd_avanzado):
+            # Intento 2: flags basicos (compatibilidad con rpicam-vid viejo)
+            _log.warning(
+                "rpicam-vid fallo con flags avanzados (--mode/--awb). "
+                "Reintentando con flags basicos. El tinte rosa del NoIR "
+                "podria no corregirse en esta version de rpicam-vid."
             )
+            cmd_basico = self._construir_comando(con_flags_avanzados=False)
+            _log.info("Lanzando captura (flags basicos): %s", " ".join(cmd_basico))
+
+            if not self._intentar_arrancar(cmd_basico):
+                self.detener()
+                raise ErrorCaptura(
+                    "rpicam-vid no pudo arrancar ni con flags basicos. "
+                    "Verificar que la camara CSI este conectada y detectada "
+                    "(probar: rpicam-vid --list-cameras)."
+                )
 
         self._activa = True
         self._ts_inicio = time.time()

@@ -19,7 +19,9 @@ Decisiones tomadas (ver chat de planificacion para detalle):
 
 Convencion de angulos (importante):
   - pitch: rotacion eje X -> cabeza arriba/abajo (cabeceo)
-      > 0 = mirando hacia arriba, < 0 = mirando hacia abajo
+      > 0 = mirando hacia ABAJO (cabeceo de sueño), < 0 = mirando hacia arriba
+      (convencion verificada empiricamente con el hardware: al bajar la
+      cabeza el pitch crece hacia valores positivos)
   - yaw:   rotacion eje Y -> cabeza izquierda/derecha
       > 0 = mirando a la derecha del conductor, < 0 = a la izquierda
   - roll:  rotacion eje Z -> inclinacion lateral
@@ -312,12 +314,15 @@ class AnalizadorCabeza:
 
         # solvePnP devuelve la rotacion del sistema MUNDO -> CAMARA, que tiene
         # signo opuesto a la rotacion intuitiva del rostro respecto a la pose
-        # frontal. Invertimos para que:
-        #   pitch > 0 = cabeza mirando hacia ARRIBA
+        # frontal. Invertimos para obtener esta convencion (verificada
+        # empiricamente con el hardware real):
+        #   pitch > 0 = cabeza mirando hacia ABAJO (cabeceo de sueño)
+        #   pitch < 0 = cabeza mirando hacia arriba
         #   yaw   > 0 = cabeza mirando hacia la DERECHA del conductor
         #   roll  > 0 = inclinacion oreja-DERECHA-hacia-hombro-DERECHO
         # Esta convencion es la que documentamos en el docstring del modulo
-        # y la que va a consumir el Pre-FSM del Core.
+        # y la que va a consumir el Pre-FSM del Core: un cabeceo de somnolencia
+        # se detecta como pitch creciendo hacia valores positivos.
         pitch_x = -pitch_x
         yaw_y = -yaw_y
         roll_z = -roll_z

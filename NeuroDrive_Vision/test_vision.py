@@ -100,6 +100,79 @@ CONEXIONES_MANO = [
 
 
 # =============================================================================
+# Detector de cabeceo - SOLO VISUAL / DE PRUEBA
+# =============================================================================
+#
+# IMPORTANTE: este detector NO es parte del modulo de vision de produccion.
+# La deteccion oficial de cabeceo es responsabilidad de la FSM del Core,
+# que recibe el pitch en grados desde la vision y aplica sus propias reglas.
+#
+# Esta clase existe SOLO para que en el integrador (test_vision) se pueda
+# VER en pantalla cuando el pitch indicaria un cabeceo, util para validar
+# visualmente y para las capturas del informe. Es una estimacion local,
+# no la deteccion definitiva del sistema.
+
+class DetectorCabeceoVisual:
+    """
+    Estimador visual de cabeceo para el integrador.
+
+    Considera "cabeceo" cuando el pitch SUBE por encima de un umbral de
+    forma sostenida.
+
+    CONVENCION DE PITCH (verificada empiricamente con el hardware):
+        - Cabeza mirando ABAJO  -> pitch POSITIVO (sube)  <- cabeceo de sueño
+        - Cabeza mirando ARRIBA -> pitch NEGATIVO (baja)
+    Por eso el cabeceo se detecta cuando el pitch SUPERA el umbral, no
+    cuando cae por debajo.
+
+    El umbral se mide RELATIVO al pitch neutro del conductor (obtenido
+    de la calibracion), no en valor absoluto: si tu pose neutra es -10
+    grados, un cabeceo es bajar la cabeza otros 15 grados -> pitch > +5.
+    """
+
+    # Cuantos grados por encima del neutro se considera cabeceo
+    UMBRAL_RELATIVO_GRADOS = 20.0
+    # Cuanto tiempo sostenido para contar el evento (segundos)
+    DURACION_MIN_S = 1.2
+
+    def __init__(self, pitch_neutro: float = 0.0) -> None:
+        self.pitch_neutro = pitch_neutro
+        # Cabeceo = cabeza abajo = pitch POR ENCIMA del neutro
+        self.umbral_pitch = pitch_neutro + self.UMBRAL_RELATIVO_GRADOS
+        self._ts_inicio_inclinacion = None
+        self._evento_ya_contado = False
+        self.cabeceos_contados = 0
+        self.cabeceo_en_curso = False
+
+    def actualizar(self, datos_cabeza, ts: float) -> None:
+        """Procesa la pose de cabeza de un frame."""
+        self.cabeceo_en_curso = False
+
+        if datos_cabeza is None or not datos_cabeza.valido:
+            # Sin pose valida: reseteamos el conteo en curso
+            self._ts_inicio_inclinacion = None
+            self._evento_ya_contado = False
+            return
+
+        # Cabeceo = cabeza inclinada hacia abajo = pitch por encima del umbral
+        inclinado = datos_cabeza.pitch_deg > self.umbral_pitch
+
+        if inclinado:
+            if self._ts_inicio_inclinacion is None:
+                self._ts_inicio_inclinacion = ts
+                self._evento_ya_contado = False
+            duracion = ts - self._ts_inicio_inclinacion
+            if duracion >= self.DURACION_MIN_S:
+                self.cabeceo_en_curso = True
+                if not self._evento_ya_contado:
+                    self.cabeceos_contados += 1
+                    self._evento_ya_contado = True
+        else:
+            self._ts_inicio_inclinacion = None
+            self._evento_ya_contado = False
+
+
+# =============================================================================
 # Ventana de malla futurista
 # =============================================================================
 
@@ -156,6 +229,7 @@ def dibujar_panel_metricas(
     datos_boca,
     datos_frote,
     stats_mq: dict,
+    detector_cabeceo=None,
 ) -> None:
     """
     Dibuja el panel de texto con todas las metricas en la esquina del frame.
@@ -201,6 +275,12 @@ def dibujar_panel_metricas(
         linea(f"pitch:{datos_cabeza.pitch_deg:+.0f} "
               f"yaw:{datos_cabeza.yaw_deg:+.0f} "
               f"roll:{datos_cabeza.roll_deg:+.0f}")
+
+    # Cabeceo (estimacion visual de prueba; la deteccion real la hace el Core)
+    if detector_cabeceo is not None:
+        col = COLOR_ROJO if detector_cabeceo.cabeceo_en_curso else COLOR_VERDE
+        estado_cab = "CABECEO" if detector_cabeceo.cabeceo_en_curso else "ok"
+        linea(f"cabeceo: {estado_cab}  (contados: {detector_cabeceo.cabeceos_contados})", col)
 
     # Frote
     if datos_frote is not None and datos_frote.valido:
@@ -401,6 +481,13 @@ def main(argv=None) -> int:
     # Aplicar calibracion a los analizadores
     Calibrador.aplicar(resultado_calib, analizador_ojos, analizador_boca)
 
+    # Detector de cabeceo SOLO VISUAL (no es deteccion oficial, eso es del
+    # Core). Usa el pitch_neutro de la calibracion como referencia: si la
+    # calibracion fallo, pitch_neutro queda en 0.0 y el umbral es absoluto.
+    detector_cabeceo = DetectorCabeceoVisual(
+        pitch_neutro=resultado_calib.pitch_neutro if resultado_calib.exito else 0.0
+    )
+
     # -------------------------------------------------------------
     # 4) Loop principal
     # -------------------------------------------------------------
@@ -449,6 +536,10 @@ def main(argv=None) -> int:
 
                 # El frote se procesa siempre (necesita el frame)
                 datos_frote = detector_frote.procesar(frame, datos_rostro)
+
+                # Actualizar el estimador visual de cabeceo (solo para la
+                # ventana; la deteccion oficial es del Core).
+                detector_cabeceo.actualizar(datos_cabeza, time.monotonic())
 
                 # Contar eventos
                 if datos_ojos is not None and datos_ojos.evento_parpadeo:
@@ -507,6 +598,7 @@ def main(argv=None) -> int:
                     viz, fps_actual, datos_rostro, datos_cabeza,
                     datos_ojos, datos_boca, datos_frote,
                     publicador.obtener_estadisticas(),
+                    detector_cabeceo=detector_cabeceo,
                 )
 
             cv2.imshow("NeuroDrive Vision", viz)
@@ -565,6 +657,7 @@ def main(argv=None) -> int:
     print(f"  Eventos de parpadeo:    {eventos_parpadeo}")
     print(f"  Eventos de bostezo:     {eventos_bostezo}")
     print(f"  Eventos de frote:       {eventos_frote}")
+    print(f"  Cabeceos (estim. visual): {detector_cabeceo.cabeceos_contados}")
     print(f"  MQ enviados:            {stats_mq['mensajes_enviados']}")
     print(f"  MQ descartados:         {stats_mq['mensajes_descartados']}")
     print(f"  MQ modo simulado:       {stats_mq['modo_simulado']}")
