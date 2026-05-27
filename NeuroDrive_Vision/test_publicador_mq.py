@@ -134,8 +134,49 @@ def _():
     p = PublicadorMQ()
     assert p.nombre_cola == "/neurodrive_vision"
     assert p.id_dispositivo == "cam-01"
-    assert p.capacidad_cola == 10
+    # Sin config, el default de capacidad es 16 (coincide con config.yaml)
+    assert p.capacidad_cola == 16
+    assert p.tamano_max_mensaje == 1024
     assert not p.activo
+
+
+@_test("Lee cola, capacidad y tamano desde config si se pasa")
+def _():
+    # Simulamos un objeto config con la estructura que espera el publicador
+    class _FakeIPC:
+        cola_vision = "/cola_de_prueba"
+        capacidad_cola = 25
+        tamano_max_mensaje_bytes = 2048
+    class _FakeIdent:
+        id_camara = "cam-test"
+    class _FakeConfig:
+        ipc = _FakeIPC()
+        identificadores = _FakeIdent()
+
+    p = PublicadorMQ(config=_FakeConfig())
+    assert p.nombre_cola == "/cola_de_prueba", f"nombre={p.nombre_cola}"
+    assert p.capacidad_cola == 25, f"capacidad={p.capacidad_cola}"
+    assert p.tamano_max_mensaje == 2048, f"tamano={p.tamano_max_mensaje}"
+    assert p.id_dispositivo == "cam-test"
+
+
+@_test("Parametro explicito tiene prioridad sobre config")
+def _():
+    class _FakeIPC:
+        cola_vision = "/cola_config"
+        capacidad_cola = 25
+        tamano_max_mensaje_bytes = 2048
+    class _FakeIdent:
+        id_camara = "cam-config"
+    class _FakeConfig:
+        ipc = _FakeIPC()
+        identificadores = _FakeIdent()
+
+    # El parametro explicito debe ganarle al config
+    p = PublicadorMQ(config=_FakeConfig(), capacidad_cola=99,
+                     nombre_cola="/cola_explicita")
+    assert p.capacidad_cola == 99
+    assert p.nombre_cola == "/cola_explicita"
 
 
 @_test("Construccion con capacidad invalida falla")
@@ -276,6 +317,59 @@ def _():
     assert abs(d["ear_derecho"] - 0.26) < 1e-6
 
 
+@_test("pitch_neutro=0 (default): el pitch se envia crudo")
+def _():
+    p = PublicadorMQ(forzar_simulado=True)
+    assert p.pitch_neutro == 0.0
+    d = p._construir_evento_dict(
+        _datos_rostro(),
+        _datos_ojos(ear_izq=0.25, ear_der=0.25),
+        _datos_boca(),
+        _datos_cabeza(pitch=15.0, yaw=2.0, roll=1.0),
+        _datos_frote(),
+    )
+    # Sin normalizacion, el pitch sale igual al crudo
+    assert abs(d["pitch_grados"] - 15.0) < 1e-6, f"pitch={d['pitch_grados']}"
+
+
+@_test("pitch_neutro != 0: el publicador resta el neutro al pitch")
+def _():
+    # Conductor con pose neutra de -12 grados (camara montada inclinada)
+    p = PublicadorMQ(forzar_simulado=True, pitch_neutro=-12.0)
+    assert p.pitch_neutro == -12.0
+    d = p._construir_evento_dict(
+        _datos_rostro(),
+        _datos_ojos(ear_izq=0.25, ear_der=0.25),
+        _datos_boca(),
+        _datos_cabeza(pitch=8.0, yaw=3.0, roll=1.0),
+        _datos_frote(),
+    )
+    # pitch crudo 8.0, neutro -12.0 -> normalizado = 8.0 - (-12.0) = 20.0
+    assert abs(d["pitch_grados"] - 20.0) < 1e-6, (
+        f"pitch normalizado deberia ser 20.0, es {d['pitch_grados']}"
+    )
+    # yaw y roll NO se normalizan
+    assert abs(d["yaw_grados"] - 3.0) < 1e-6, "yaw no debe normalizarse"
+    assert abs(d["roll_grados"] - 1.0) < 1e-6, "roll no debe normalizarse"
+
+
+@_test("pitch_neutro: cabeza en pose neutra -> pitch normalizado ~0")
+def _():
+    # Si el conductor esta en su pose neutra, el pitch normalizado es ~0
+    p = PublicadorMQ(forzar_simulado=True, pitch_neutro=-12.0)
+    d = p._construir_evento_dict(
+        _datos_rostro(),
+        _datos_ojos(ear_izq=0.25, ear_der=0.25),
+        _datos_boca(),
+        _datos_cabeza(pitch=-12.0, yaw=0.0, roll=0.0),
+        _datos_frote(),
+    )
+    # pitch crudo = neutro -> normalizado = 0
+    assert abs(d["pitch_grados"]) < 1e-6, (
+        f"en pose neutra el pitch normalizado deberia ser ~0, es {d['pitch_grados']}"
+    )
+
+
 @_test("numero_secuencia incrementa por mensaje")
 def _():
     p = PublicadorMQ(forzar_simulado=True)
@@ -326,6 +420,58 @@ def _():
     assert not p.activo
 
 
+@_test("chequear_limites_sistema detecta capacidad excesiva")
+def _():
+    from NeuroDrive_Vision.publicador_mq import (
+        chequear_limites_sistema, ErrorLimitesSistema, _leer_limite_kernel,
+    )
+    import os
+    # Solo tiene sentido en Linux con soporte de mqueue
+    if not os.path.isdir("/proc/sys/fs/mqueue"):
+        print("    (saltado: no hay /proc/sys/fs/mqueue)")
+        return
+
+    msg_max = _leer_limite_kernel("/proc/sys/fs/mqueue/msg_max")
+    if msg_max is None:
+        print("    (saltado: no se pudo leer msg_max)")
+        return
+
+    # Pedir el doble del limite del kernel debe lanzar ErrorLimitesSistema
+    capacidad_excesiva = msg_max * 2
+    try:
+        chequear_limites_sistema(capacidad_excesiva, 1024)
+        raise AssertionError(
+            f"deberia fallar con capacidad {capacidad_excesiva} "
+            f"(kernel msg_max={msg_max})"
+        )
+    except ErrorLimitesSistema as e:
+        # El mensaje debe ser util: mencionar el limite y como resolverlo
+        msg = str(e)
+        assert "msg_max" in msg, "el error deberia mencionar msg_max"
+        assert "config.yaml" in msg or "sysctl" in msg, (
+            "el error deberia indicar como resolverlo"
+        )
+        print(f"    error claro generado OK (kernel msg_max={msg_max})")
+
+
+@_test("chequear_limites_sistema acepta capacidad valida")
+def _():
+    from NeuroDrive_Vision.publicador_mq import (
+        chequear_limites_sistema, _leer_limite_kernel,
+    )
+    import os
+    if not os.path.isdir("/proc/sys/fs/mqueue"):
+        print("    (saltado: no hay /proc/sys/fs/mqueue)")
+        return
+    msg_max = _leer_limite_kernel("/proc/sys/fs/mqueue/msg_max")
+    if msg_max is None:
+        print("    (saltado)")
+        return
+    # Una capacidad dentro del limite no debe lanzar nada
+    chequear_limites_sistema(min(msg_max, 10), 1024)
+    print(f"    capacidad valida aceptada OK")
+
+
 # =============================================================================
 # TESTS CON MODO REAL (requieren posix_ipc + contratos del Core)
 # =============================================================================
@@ -356,7 +502,8 @@ else:
     @_test("Modo real: abrir y cerrar cola POSIX MQ")
     def _():
         _limpiar_cola_test()
-        p = PublicadorMQ(nombre_cola=COLA_TEST)
+        # capacidad 8: compatible con el limite tipico del kernel (msg_max=10)
+        p = PublicadorMQ(nombre_cola=COLA_TEST, capacidad_cola=8)
         assert p.modo_simulado is False
         p.iniciar()
         try:
@@ -369,7 +516,7 @@ else:
     @_test("Modo real: publicar Envelope real, tamanio < 1024 bytes")
     def _():
         _limpiar_cola_test()
-        p = PublicadorMQ(nombre_cola=COLA_TEST)
+        p = PublicadorMQ(nombre_cola=COLA_TEST, capacidad_cola=8)
         p.iniciar()
         try:
             ok = p.publicar(

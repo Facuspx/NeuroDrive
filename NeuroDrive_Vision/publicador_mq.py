@@ -34,6 +34,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from pathlib import Path
 from typing import Optional, TYPE_CHECKING
 
 from NeuroDrive_Vision.detector_rostro import DatosRostro
@@ -113,6 +114,74 @@ class ErrorPublicadorMQ(Exception):
     """Error tecnico en el publicador."""
 
 
+class ErrorLimitesSistema(ErrorPublicadorMQ):
+    """Los limites del kernel no permiten la configuracion de cola pedida."""
+
+
+# =============================================================================
+# Chequeo de limites del kernel para POSIX MQ
+# =============================================================================
+
+def _leer_limite_kernel(path: str) -> Optional[int]:
+    """Lee un limite entero desde /proc/sys/fs/mqueue/. None si no se puede."""
+    try:
+        with open(path, "r") as f:
+            return int(f.read().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def chequear_limites_sistema(capacidad: int, tamano_max_mensaje: int) -> None:
+    """
+    Verifica que los limites del kernel permitan crear una cola con la
+    capacidad y tamano pedidos.
+
+    Las POSIX MQ tienen dos limites en /proc/sys/fs/mqueue/:
+      - msg_max: cantidad maxima de mensajes por cola
+      - msgsize_max: tamano maximo de cada mensaje
+
+    Si la configuracion los excede, posix_ipc falla con un error criptico
+    ("Invalid parameter(s)"). Esta funcion detecta el problema antes y
+    lanza un error claro con la instruccion para resolverlo.
+
+    En sistemas que no son Linux, el chequeo se omite silenciosamente.
+
+    Raises:
+        ErrorLimitesSistema: si los limites del kernel son insuficientes.
+    """
+    if not Path("/proc/sys/fs/mqueue").is_dir():
+        # No es Linux o no hay soporte de mqueue: no podemos chequear
+        return
+
+    msg_max = _leer_limite_kernel("/proc/sys/fs/mqueue/msg_max")
+    msgsize_max = _leer_limite_kernel("/proc/sys/fs/mqueue/msgsize_max")
+
+    problemas = []
+
+    if msg_max is not None and capacidad > msg_max:
+        problemas.append(
+            f"  - capacidad de cola pedida ({capacidad}) > limite del kernel "
+            f"msg_max ({msg_max}).\n"
+            f"    Opcion A (recomendada): bajar 'capacidad_cola' a {msg_max} "
+            f"o menos en config.yaml, seccion [ipc].\n"
+            f"    Opcion B: subir el limite del kernel (requiere root):\n"
+            f"      sudo sysctl -w fs.mqueue.msg_max={max(capacidad, 32)}"
+        )
+
+    if msgsize_max is not None and tamano_max_mensaje > msgsize_max:
+        problemas.append(
+            f"  - tamano de mensaje pedido ({tamano_max_mensaje}) > limite "
+            f"del kernel msgsize_max ({msgsize_max}).\n"
+            f"      sudo sysctl -w fs.mqueue.msgsize_max={max(tamano_max_mensaje, 8192)}"
+        )
+
+    if problemas:
+        raise ErrorLimitesSistema(
+            "Los limites del kernel no permiten crear la cola POSIX MQ:\n"
+            + "\n".join(problemas)
+        )
+
+
 # =============================================================================
 # Clase principal
 # =============================================================================
@@ -135,16 +204,16 @@ class PublicadorMQ:
       - detener(): cierra la cola.
     """
 
-    # Nombre de la cola POSIX MQ (debe coincidir con el del Gestor del Core)
+    # Nombre de la cola POSIX MQ (fallback si no hay config)
     NOMBRE_COLA_DEFAULT = "/neurodrive_vision"
 
-    # Tamanio maximo de mensaje (bytes). Debe coincidir con el config del Core.
-    TAMANIO_MAX_MENSAJE = 1024
+    # Tamanio maximo de mensaje en bytes (fallback si no hay config)
+    TAMANIO_MAX_DEFAULT = 1024
 
-    # Capacidad maxima de la cola (cantidad de mensajes)
-    CAPACIDAD_COLA_DEFAULT = 10
+    # Capacidad maxima de la cola (fallback si no hay config)
+    CAPACIDAD_COLA_DEFAULT = 16
 
-    # ID de este dispositivo de vision
+    # ID de este dispositivo de vision (fallback si no hay config)
     ID_DISPOSITIVO_DEFAULT = "cam-01"
 
     def __init__(
@@ -153,49 +222,115 @@ class PublicadorMQ:
         nombre_cola: Optional[str] = None,
         id_dispositivo: Optional[str] = None,
         capacidad_cola: Optional[int] = None,
+        tamano_max_mensaje: Optional[int] = None,
         forzar_simulado: bool = False,
         drenar_al_iniciar: bool = True,
         eliminar_al_detener: bool = True,
+        pitch_neutro: float = 0.0,
     ) -> None:
         """
         Parametros
         ----------
         config : Config | None
-            Configuracion global (reservada).
+            Configuracion global. Si se pasa, el publicador lee de la
+            seccion 'ipc' el nombre de cola, la capacidad y el tamano
+            maximo de mensaje. Asi vision y Core usan la MISMA fuente de
+            verdad (config.yaml) y no se desincronizan.
         nombre_cola : str | None
-            Nombre de la POSIX MQ. Default "/neurodrive_vision".
+            Nombre de la POSIX MQ. Si se pasa, tiene prioridad sobre el
+            config. Si no, se usa config.ipc.cola_vision, y si no hay
+            config, "/neurodrive_vision".
         id_dispositivo : str | None
-            Identificador de esta camara. Default "cam-01".
+            Identificador de esta camara. Prioridad: parametro > config >
+            "cam-01".
         capacidad_cola : int | None
-            Cantidad maxima de mensajes en la cola. Default 10.
+            Capacidad de la cola. Prioridad: parametro > config.ipc.
+            capacidad_cola > 16.
+        tamano_max_mensaje : int | None
+            Tamano maximo de mensaje en bytes. Prioridad: parametro >
+            config.ipc.tamano_max_mensaje_bytes > 1024.
         forzar_simulado : bool
             Si True, opera en modo simulado aunque posix_ipc este disponible.
-            Util para tests.
         drenar_al_iniciar : bool
-            Si True (default), al iniciar vacia los mensajes viejos que hayan
-            quedado en la cola de una corrida anterior. Evita arrancar con
-            una cola "envenenada".
+            Si True (default), al iniciar vacia los mensajes viejos de la
+            cola. INTEGRADO CON EL CORE: poner en False. El Core es el
+            duenio de la cola; la vision no debe drenarla (borraria eventos
+            que el Core todavia no consumio).
         eliminar_al_detener : bool
-            Si True (default), al detener elimina la cola del kernel (unlink).
-            IMPORTANTE: las POSIX MQ persisten en el kernel hasta reiniciar
-            o hasta hacer unlink. Mientras el Core (el consumidor) no exista,
-            la vision es la duenia de la cola y debe eliminarla al cerrar,
-            sino la cola queda llena ocupando memoria del kernel.
-            Cuando se integre el Core, poner esto en False (el Core maneja
-            el ciclo de vida de la cola).
+            Si True (default), al detener elimina la cola del kernel.
+            INTEGRADO CON EL CORE: poner en False. El Core gestiona el
+            ciclo de vida de la cola.
+        pitch_neutro : float
+            Angulo de pitch (en grados) de la pose neutra del conductor,
+            obtenido de la calibracion. La vision se lo RESTA al pitch
+            crudo antes de enviar el EventoVision, para que el umbral de
+            cabeceo absoluto del Core (config.cabeza.umbral_pitch_grados)
+            se interprete relativo a la pose neutra real.
+            Default 0.0 = sin normalizacion (se envia el pitch crudo).
+            El integrador (test_vision / main) lo setea tras calibrar.
         """
         self.config = config
-        self.nombre_cola = nombre_cola or self.NOMBRE_COLA_DEFAULT
-        self.id_dispositivo = id_dispositivo or self.ID_DISPOSITIVO_DEFAULT
+
+        # ---- Resolucion de parametros: explicito > config > default ----
+        # Nombre de cola
+        if nombre_cola is not None:
+            self.nombre_cola = nombre_cola
+        elif config is not None:
+            self.nombre_cola = config.ipc.cola_vision
+        else:
+            self.nombre_cola = self.NOMBRE_COLA_DEFAULT
+
+        # ID de dispositivo
+        if id_dispositivo is not None:
+            self.id_dispositivo = id_dispositivo
+        elif config is not None:
+            self.id_dispositivo = config.identificadores.id_camara
+        else:
+            self.id_dispositivo = self.ID_DISPOSITIVO_DEFAULT
+
+        # Capacidad de cola
+        if capacidad_cola is not None:
+            cap = int(capacidad_cola)
+        elif config is not None:
+            cap = int(config.ipc.capacidad_cola)
+        else:
+            cap = self.CAPACIDAD_COLA_DEFAULT
+        if cap < 1:
+            raise ValueError(f"capacidad_cola debe ser >= 1, recibido {cap}")
+        self.capacidad_cola = cap
+
+        # Tamano maximo de mensaje
+        if tamano_max_mensaje is not None:
+            tam = int(tamano_max_mensaje)
+        elif config is not None:
+            tam = int(config.ipc.tamano_max_mensaje_bytes)
+        else:
+            tam = self.TAMANIO_MAX_DEFAULT
+        if tam < 128:
+            raise ValueError(f"tamano_max_mensaje muy chico: {tam}")
+        self.tamano_max_mensaje = tam
+
         self.drenar_al_iniciar = bool(drenar_al_iniciar)
         self.eliminar_al_detener = bool(eliminar_al_detener)
 
-        if capacidad_cola is not None:
-            if capacidad_cola < 1:
-                raise ValueError("capacidad_cola debe ser >= 1")
-            self.capacidad_cola = int(capacidad_cola)
-        else:
-            self.capacidad_cola = self.CAPACIDAD_COLA_DEFAULT
+        # Normalizacion del pitch (Opcion A de integracion con el Core).
+        # El Core usa un umbral de cabeceo ABSOLUTO (config.cabeza.
+        # umbral_pitch_grados = 20). Pero la pose neutra del conductor NO
+        # es 0 grados: depende de como este montada la camara (la
+        # calibracion mide un pitch_neutro tipicamente negativo).
+        # Para que el umbral absoluto del Core funcione bien, la vision
+        # NORMALIZA el pitch: le resta el pitch_neutro antes de enviarlo.
+        # Asi el Core recibe pitch "compensado por montaje", y su umbral
+        # de 20 grados pasa a significar 20 grados DESDE el neutro real.
+        #
+        # IMPORTANTE (para la documentacion del TFI): con esto, el campo
+        # pitch_grados del EventoVision NO es el angulo de Euler crudo,
+        # sino el angulo normalizado respecto a la pose neutra calibrada.
+        # Es una decision de diseño deliberada, no un descuido.
+        #
+        # pitch_neutro = 0.0 (default) => sin normalizacion (pitch crudo).
+        # El integrador setea el pitch_neutro real tras la calibracion.
+        self.pitch_neutro = float(pitch_neutro)
 
         # Decidir el modo de operacion
         self.modo_simulado = (
@@ -316,19 +451,30 @@ class PublicadorMQ:
             except Exception as e:
                 _log.warning("No se pudo limpiar la cola preexistente: %s", e)
 
-        # Paso 2: crear la cola nueva y limpia
+        # Paso 2: verificar que los limites del kernel permitan esta config.
+        # Si no, lanza ErrorLimitesSistema con instrucciones claras (en vez
+        # del criptico "Invalid parameter(s)" que daria posix_ipc).
+        try:
+            chequear_limites_sistema(self.capacidad_cola, self.tamano_max_mensaje)
+        except ErrorLimitesSistema:
+            self._activo = False
+            raise
+
+        # Paso 3: crear la cola nueva y limpia
         try:
             self._cola = posix_ipc.MessageQueue(
                 self.nombre_cola,
                 flags=posix_ipc.O_CREAT,
                 max_messages=self.capacidad_cola,
-                max_message_size=self.TAMANIO_MAX_MENSAJE,
+                max_message_size=self.tamano_max_mensaje,
             )
             self._activo = True
             _log.info(
                 "PublicadorMQ iniciado (cola=%s, capacidad=%d, sesion=%s)",
                 self.nombre_cola, self.capacidad_cola, self._id_sesion,
             )
+        except ErrorLimitesSistema:
+            raise
         except Exception as e:
             self._cola = None
             self._activo = False
@@ -369,6 +515,27 @@ class PublicadorMQ:
         _log.info(
             "PublicadorMQ detenido (enviados=%d, descartados=%d, errores=%d)",
             self._mensajes_enviados, self._mensajes_descartados, self._errores,
+        )
+
+    def setear_pitch_neutro(self, pitch_neutro: float) -> None:
+        """
+        Actualiza el pitch_neutro usado para normalizar el pitch.
+
+        Pensado para llamarse despues de la calibracion: el publicador se
+        crea e inicia temprano (para detectar problemas de cola al
+        arrancar), pero el pitch_neutro recien se conoce cuando termina la
+        calibracion. Este metodo cierra esa brecha.
+
+        Parametros
+        ----------
+        pitch_neutro : float
+            Angulo de pitch de la pose neutra del conductor, en grados.
+        """
+        anterior = self.pitch_neutro
+        self.pitch_neutro = float(pitch_neutro)
+        _log.info(
+            "PublicadorMQ: pitch_neutro actualizado %.1f -> %.1f grados",
+            anterior, self.pitch_neutro,
         )
 
     def __enter__(self) -> "PublicadorMQ":
@@ -452,7 +619,15 @@ class PublicadorMQ:
         yaw = None
         roll = None
         if rostro and datos_cabeza is not None and datos_cabeza.valido:
-            pitch = datos_cabeza.pitch_deg
+            # NORMALIZACION DEL PITCH (Opcion A de integracion):
+            # restamos el pitch_neutro de la calibracion. El Core recibe
+            # asi un pitch relativo a la pose neutra del conductor, y su
+            # umbral de cabeceo absoluto se interpreta correctamente.
+            # Si pitch_neutro es 0.0 (default), esto no cambia nada.
+            # yaw y roll NO se normalizan: el Core los usa como angulos
+            # absolutos (yaw para invalidar cabeceo si la cabeza esta
+            # muy girada; eso no depende de la pose neutra de pitch).
+            pitch = datos_cabeza.pitch_deg - self.pitch_neutro
             yaw = datos_cabeza.yaw_deg
             roll = datos_cabeza.roll_deg
 
@@ -465,8 +640,17 @@ class PublicadorMQ:
             datos_rostro, datos_ojos, datos_boca, datos_cabeza,
         )
 
-        # timestamp: usamos el del frame si esta, sino el actual
-        ts = datos_rostro.timestamp if datos_rostro.timestamp > 0 else time.time()
+        # timestamp: el contrato EventoVision exige timestamp > 0 en su
+        # __post_init__ (lanza ValueError si no). Blindamos: usamos el del
+        # frame si es valido, y si no, time.time(). Como ultimo resguardo,
+        # si por algun borde el valor no fuera positivo, forzamos time.time().
+        ts = datos_rostro.timestamp
+        if ts is None or ts <= 0:
+            ts = time.time()
+        # Resguardo final: time.time() siempre es > 0 en un sistema con reloj
+        # valido, pero garantizamos el invariante del contrato de todos modos.
+        if ts <= 0:
+            ts = time.time()
 
         return {
             "timestamp": ts,
@@ -565,10 +749,10 @@ class PublicadorMQ:
             mensaje_bytes = mensaje.encode("utf-8")
 
             # Validar tamanio
-            if len(mensaje_bytes) > self.TAMANIO_MAX_MENSAJE:
+            if len(mensaje_bytes) > self.tamano_max_mensaje:
                 _log.error(
                     "Mensaje #%d demasiado grande (%d bytes > %d). Descartado.",
-                    self._numero_secuencia, len(mensaje_bytes), self.TAMANIO_MAX_MENSAJE,
+                    self._numero_secuencia, len(mensaje_bytes), self.tamano_max_mensaje,
                 )
                 self._errores += 1
                 return False

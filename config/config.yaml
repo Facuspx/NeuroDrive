@@ -157,7 +157,7 @@ ipc:
   cola_wearable: "/neurodrive_wearable"
 
   # Capacidad de cada cola (cantidad de mensajes en buffer)
-  capacidad_cola: 16
+  capacidad_cola: 10
 
   # Tamaño máximo de mensaje en bytes (para POSIX MQ)
   tamano_max_mensaje_bytes: 1024

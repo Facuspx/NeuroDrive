@@ -131,7 +131,7 @@ class DetectorCabeceoVisual:
     """
 
     # Cuantos grados por encima del neutro se considera cabeceo
-    UMBRAL_RELATIVO_GRADOS = 20.0
+    UMBRAL_RELATIVO_GRADOS = 15.0
     # Cuanto tiempo sostenido para contar el evento (segundos)
     DURACION_MIN_S = 1.2
 
@@ -425,7 +425,18 @@ def main(argv=None) -> int:
     # Mientras el Core no exista, nadie consume la cola: el modo simulado
     # ejercita todo el publicador (construye EventoVision, Envelope, valida
     # tamanios) sin crear una cola real que se llenaria sin consumidor.
-    publicador = PublicadorMQ(config, forzar_simulado=not args.mq_real)
+    #
+    # Con --mq-real (integracion con el Core), el publicador NO debe tocar
+    # el ciclo de vida de la cola: el Core es su duenio. Por eso, en modo
+    # real, drenar_al_iniciar y eliminar_al_detener van en False.
+    # En modo simulado esos flags son irrelevantes (no hay cola real).
+    modo_integrado = args.mq_real
+    publicador = PublicadorMQ(
+        config,
+        forzar_simulado=not args.mq_real,
+        drenar_al_iniciar=not modo_integrado,
+        eliminar_al_detener=not modo_integrado,
+    )
 
     # Contadores del reporte final
     frames_totales = 0
@@ -452,7 +463,10 @@ def main(argv=None) -> int:
             print("MQ: modo simulado (el Core aun no consume la cola). "
                   "Usar --mq-real para la cola POSIX real.")
         else:
-            print("MQ: modo real, cola POSIX MQ activa.")
+            print("MQ: modo real INTEGRADO con el Core.")
+            print("  - La vision no drena ni elimina la cola (el Core es duenio).")
+            print("  - Si la cola no existe aun, se crea con la capacidad del")
+            print("    config.yaml; el Core se conecta a la misma cola.")
     except Exception as e:
         print(f"ERROR FATAL al iniciar modulos: {e}")
         _cerrar_todo(cap, detector_rostro, detector_frote, publicador)
@@ -481,12 +495,20 @@ def main(argv=None) -> int:
     # Aplicar calibracion a los analizadores
     Calibrador.aplicar(resultado_calib, analizador_ojos, analizador_boca)
 
+    # Pasar el pitch_neutro de la calibracion al publicador, para que
+    # normalice el pitch antes de enviarlo al Core (Opcion A de integracion).
+    # Si la calibracion fallo, queda en 0.0 (sin normalizacion).
+    pitch_neutro_calib = (
+        resultado_calib.pitch_neutro if resultado_calib.exito else 0.0
+    )
+    publicador.setear_pitch_neutro(pitch_neutro_calib)
+    print(f"Publicador MQ: pitch_neutro = {pitch_neutro_calib:+.1f} grados "
+          f"(el pitch se enviara normalizado al Core)")
+
     # Detector de cabeceo SOLO VISUAL (no es deteccion oficial, eso es del
     # Core). Usa el pitch_neutro de la calibracion como referencia: si la
     # calibracion fallo, pitch_neutro queda en 0.0 y el umbral es absoluto.
-    detector_cabeceo = DetectorCabeceoVisual(
-        pitch_neutro=resultado_calib.pitch_neutro if resultado_calib.exito else 0.0
-    )
+    detector_cabeceo = DetectorCabeceoVisual(pitch_neutro=pitch_neutro_calib)
 
     # -------------------------------------------------------------
     # 4) Loop principal
