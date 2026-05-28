@@ -147,32 +147,3 @@ flowchart TB
     CONTRATOS -. tipos de datos .-> VISION
     CONTRATOS -. tipos de datos .-> CORE
 ```
-
----
-## 4. Diagrama de estados de la FSM
-
-```mermaid
-stateDiagram-v2
-    [*] --> NORMAL
-
-    NORMAL       --> PRE_ALERTA    : señales leves sostenidas
-    PRE_ALERTA   --> NORMAL        : 60 s sin eventos negativos
-    PRE_ALERTA   --> ALERTA_LEVE   : evento confirmado (bostezo / microsueño)
-    ALERTA_LEVE  --> PRE_ALERTA    : ACK correcto
-    ALERTA_LEVE  --> ALERTA_MEDIA  : timeout ACK / microsueño / 2do evento
-    ALERTA_MEDIA --> PRE_ALERTA    : ACK correcto + BPM normal
-    ALERTA_MEDIA --> CRITICO       : timeout ACK + BPM crítico / cabeceo + BPM crítico
-    CRITICO      --> PRE_ALERTA    : ACK correcto (reacción activa)
-
-    NORMAL       --> MODO_DEGRADADO : fallo de sensor (sev >= 2)
-    ALERTA_MEDIA --> MODO_DEGRADADO : fallo de sensor (sev >= 2)
-    CRITICO      --> MODO_DEGRADADO : fallo de sensor (sev >= 2)
-    MODO_DEGRADADO --> NORMAL       : recuperación de sensor
-
-    note right of NORMAL
-        Nivel NORMAL      = NORMAL + PRE_ALERTA
-        Nivel ADVERTENCIA = ALERTA_LEVE + ALERTA_MEDIA
-        Nivel CRITICO     = CRITICO
-        MODO_DEGRADADO: transversal (desde cualquier estado)
-    end note
-```
