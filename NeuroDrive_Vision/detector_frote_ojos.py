@@ -639,7 +639,7 @@ class DetectorFroteOjos:
             if region is not None and region[2] > 0 and region[3] > 0:
                 x, y, w, h = region
                 color = (0, 0, 255) if datos.frote_en_curso else (0, 255, 255)
-                cv2.rectangle(out, (x, y), (x + w, y + h), color, 1)
+                #cv2.rectangle(out, (x, y), (x + w, y + h), color, 1)
 
         # Puntas de dedos
         for (px, py) in datos.puntas_detectadas:

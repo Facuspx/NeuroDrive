@@ -157,6 +157,7 @@ class AnalizadorOjos:
 
     # Limites de duracion de eventos (ms)
     DURACION_MIN_PARPADEO_MS = 60       # menos que esto es ruido, no parpadeo
+    REFRACTARIO_PARPADEO_S = 0.25
     DURACION_MAX_NORMAL_MS = 400        # parpadeo normal hasta 400 ms
     DURACION_MAX_LENTO_MS = 1500        # parpadeo lento hasta 1500 ms
     # > 1500 ms = microsueño
@@ -234,7 +235,9 @@ class AnalizadorOjos:
 
         # Cuando empezo el cierre actual (si lo hay)
         self._ts_inicio_cierre: Optional[float] = None
-
+        # Timestamp del ultimo evento_parpadeo emitido. Sirve para descartar
+        # nuevos eventos dentro del periodo refractario.
+        self._ts_ultimo_evento_parpadeo: Optional[float] = None
         # Timestamp del ultimo frame con rostro presente
         self._ts_ultimo_rostro: Optional[float] = None
 
@@ -284,6 +287,7 @@ class AnalizadorOjos:
         self._historial_parpadeos.clear()
         self._ojos_cerrados_estado = False
         self._ts_inicio_cierre = None
+        self._ts_ultimo_evento_parpadeo = None
         self._ts_ultimo_rostro = None
         _log.info("AnalizadorOjos: estado reseteado")
 
@@ -485,19 +489,36 @@ class AnalizadorOjos:
             # Transicion abierto -> cerrado: arranca un cierre
             self._ts_inicio_cierre = ts_frame
         elif not cerrados and estado_anterior:
-            # Transicion cerrado -> abierto: terminamos un cierre, clasificamos
+            # Transicion cerrado -> abierto: terminamos un cierre, clasificamos.
             if self._ts_inicio_cierre is not None:
                 duracion = (ts_frame - self._ts_inicio_cierre) * 1000.0
-                evento = self._clasificar_parpadeo(duracion)
-                if evento:
+                evento_tentativo = self._clasificar_parpadeo(duracion)
+
+                # Filtro de refractario: si el ultimo evento_parpadeo fue
+                # hace menos de REFRACTARIO_PARPADEO_S, ignoramos este.
+                # Filtra oscilaciones rapidas cerca del umbral y re-parpadeos
+                # que inflaban el conteo (Vision ~2x el conteo real).
+                # NOTA: los eventos "lento" y "microsue�o" SI se dejan pasar
+                # aunque esten dentro del refractario: son senales de fatiga
+                # importantes y no queremos que un parpadeo previo las oculte.
+                en_refractario = (
+                    self._ts_ultimo_evento_parpadeo is not None
+                    and (ts_frame - self._ts_ultimo_evento_parpadeo)
+                        < self.REFRACTARIO_PARPADEO_S
+                )
+                if evento_tentativo and (
+                    not en_refractario or evento_tentativo != "normal"
+                ):
+                    evento = evento_tentativo
                     duracion_evento_ms = duracion
+                    self._ts_ultimo_evento_parpadeo = ts_frame
                     # Solo contamos como "parpadeo" para BPM los normales
-                    # (los lentos y microsueños son senales de fatiga, no de
+                    # (los lentos y microsue�os son senales de fatiga, no de
                     # parpadeo regular). El Pre-FSM puede combinar como quiera.
                     if evento == "normal":
                         self._agregar_parpadeo(ts_frame)
                 self._ts_inicio_cierre = None
-
+                
         # 5) Duracion del cierre actual (si esta cerrado en este frame)
         duracion_cierre_actual_ms = 0.0
         if cerrados and self._ts_inicio_cierre is not None:

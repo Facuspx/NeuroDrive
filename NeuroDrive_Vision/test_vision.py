@@ -49,6 +49,7 @@ import numpy as np
 
 from NeuroDrive_Core.config_loader import cargar_config, limpiar_cache
 from NeuroDrive_Vision.captura_video import CapturaVideo
+from NeuroDrive_Vision.captura_archivo import CapturaArchivo
 from NeuroDrive_Vision.detector_rostro import DetectorRostro
 from NeuroDrive_Vision.analizador_cabeza import AnalizadorCabeza
 from NeuroDrive_Vision.analizador_ojos import AnalizadorOjos
@@ -403,6 +404,27 @@ def main(argv=None) -> int:
                              "mientras el NeuroDrive Core no exista nadie "
                              "consume la cola. Activar solo cuando se integre "
                              "el Core.")
+    # ---- Fuente de video: camara real (default) o archivo grabado ----
+    parser.add_argument("--video", type=str, default=None,
+                        help="Ruta a un archivo de video para usar como fuente "
+                             "en vez de la camara. Util para tests reproducibles "
+                             "y para validar sin necesidad de la camara. Se "
+                             "recomienda grabar previamente con rpicam-vid.")
+    parser.add_argument("--tiempo-real", action="store_true",
+                        help="(Solo con --video) Reproduce el video a su ritmo "
+                             "real (con sleep si hace falta). Sin este flag, el "
+                             "video se procesa lo mas rapido posible. Usar para "
+                             "demo y para integracion con el Core.")
+    parser.add_argument("--loop", action="store_true",
+                        help="(Solo con --video) Cuando el video termina, "
+                             "reinicia desde el principio. Util para probar "
+                             "durante mucho tiempo con un video corto.")
+    parser.add_argument("--fps-video", type=float, default=None,
+                        help="(Solo con --video) FPS con que se grabo el video, "
+                             "para casos donde el archivo no tiene metadatos de "
+                             "FPS (tipico en raw MJPEG de rpicam-vid). Si el "
+                             "video se ve rapido o lento, poner aca el mismo "
+                             "--framerate que usaste al grabar (ej: 15).")
     args = parser.parse_args(argv)
 
     print("=" * 60)
@@ -415,7 +437,30 @@ def main(argv=None) -> int:
     # -------------------------------------------------------------
     # 1) Instanciar modulos
     # -------------------------------------------------------------
-    cap = CapturaVideo(config)
+    # Fuente de video: camara real si no se paso --video; si se paso,
+    # archivo. Ambas exponen la misma API (iniciar, leer, detener,
+    # activa, fps_real, context manager), asi que el pipeline no cambia.
+    if args.video is not None:
+        modo_ts = (CapturaArchivo.MODO_TIEMPO_REAL if args.tiempo_real
+                   else CapturaArchivo.MODO_VIDEO)
+        cap = CapturaArchivo(
+            config,
+            ruta=args.video,
+            modo_timestamp=modo_ts,
+            loop=args.loop,
+            fps_override=args.fps_video,
+        )
+        print(f"\nFuente: archivo de video '{args.video}'")
+        print(f"  Modo timestamp: {modo_ts}"
+              f"{'  (procesamiento rapido)' if modo_ts == CapturaArchivo.MODO_VIDEO else '  (ritmo real)'}")
+        if args.loop:
+            print("  Loop: si (se reinicia al terminar)")
+        if args.fps_video is not None:
+            print(f"  fps_override: {args.fps_video}")
+    else:
+        cap = CapturaVideo(config)
+        print("\nFuente: camara CSI en vivo")
+
     detector_rostro = DetectorRostro()
     analizador_cabeza = AnalizadorCabeza()
     analizador_ojos = AnalizadorOjos()
@@ -484,6 +529,22 @@ def main(argv=None) -> int:
             print(f"  ear_base={resultado_calib.ear_base:.3f}")
 
     if resultado_calib is None or not resultado_calib.exito:
+        # Guarda: con --video sin --recalibrar exigimos calibracion cargada.
+        # No queremos calibrar desde un video por accidente (podria no tener
+        # cara neutra al inicio). Con --recalibrar, permitimos calibrar
+        # tambien desde video (usa los primeros duracion_calibracion segundos).
+        if args.video is not None and not args.recalibrar:
+            print("\nERROR: se pidio --video sin calibracion previa cargada.")
+            print("  Opciones:")
+            print("  a) Calibrar una vez con la camara real:")
+            print(f"       python -m NeuroDrive_Vision.test_vision --recalibrar")
+            print("     (esto genera calibracion.json)")
+            print("  b) O forzar calibracion desde el video:")
+            print(f"       python -m NeuroDrive_Vision.test_vision --video {args.video} --recalibrar")
+            print("     (usa los primeros segundos del video como calibracion)")
+            _cerrar_todo(cap, detector_rostro, detector_frote, publicador)
+            return 1
+
         try:
             resultado_calib = fase_calibracion(
                 cap, detector_rostro, args.duracion_calibracion,
@@ -495,20 +556,24 @@ def main(argv=None) -> int:
     # Aplicar calibracion a los analizadores
     Calibrador.aplicar(resultado_calib, analizador_ojos, analizador_boca)
 
-    # Pasar el pitch_neutro de la calibracion al publicador, para que
-    # normalice el pitch antes de enviarlo al Core (Opcion A de integracion).
-    # Si la calibracion fallo, queda en 0.0 (sin normalizacion).
-    pitch_neutro_calib = (
-        resultado_calib.pitch_neutro if resultado_calib.exito else 0.0
-    )
-    publicador.setear_pitch_neutro(pitch_neutro_calib)
-    print(f"Publicador MQ: pitch_neutro = {pitch_neutro_calib:+.1f} grados "
-          f"(el pitch se enviara normalizado al Core)")
+    # Pasar los angulos neutros de la calibracion al publicador, para que
+    # normalice pitch/yaw/roll antes de enviarlos al Core (Opcion A).
+    # Si la calibracion fallo, quedan en 0.0 (sin normalizacion).
+    if resultado_calib.exito:
+        pitch_n = resultado_calib.pitch_neutro
+        yaw_n = resultado_calib.yaw_neutro
+        roll_n = resultado_calib.roll_neutro
+    else:
+        pitch_n = yaw_n = roll_n = 0.0
+    publicador.setear_neutros_cabeza(pitch_n, yaw_n, roll_n)
+    print(f"Publicador MQ: neutros = pitch:{pitch_n:+.1f}  "
+          f"yaw:{yaw_n:+.1f}  roll:{roll_n:+.1f} grados")
+    print("  (angulos se envian normalizados al Core)")
 
     # Detector de cabeceo SOLO VISUAL (no es deteccion oficial, eso es del
     # Core). Usa el pitch_neutro de la calibracion como referencia: si la
     # calibracion fallo, pitch_neutro queda en 0.0 y el umbral es absoluto.
-    detector_cabeceo = DetectorCabeceoVisual(pitch_neutro=pitch_neutro_calib)
+    detector_cabeceo = DetectorCabeceoVisual(pitch_neutro=pitch_n)
 
     # -------------------------------------------------------------
     # 4) Loop principal
@@ -537,6 +602,11 @@ def main(argv=None) -> int:
                 continue
 
             if frame is None:
+                # Con archivo, frame=None significa fin de video: salir limpio.
+                # Con camara, es un frame perdido: continuamos.
+                if args.video is not None and not cap.activa:
+                    print(f"\nFin del video alcanzado tras {frames_totales} frames.")
+                    break
                 continue
 
             frames_totales += 1

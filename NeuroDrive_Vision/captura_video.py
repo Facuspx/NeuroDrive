@@ -201,12 +201,58 @@ class CapturaVideo:
         except OSError as e:
             raise ErrorCaptura(f"Error lanzando rpicam-vid: {e}")
 
-        # Esperar un poco y verificar que el proceso sigue corriendo
-        time.sleep(0.5)
+        # Esperar a que rpicam-vid arranque su pipeline de camara.
+        # 1.5s cubre libcamera init + tuning file + configurar streams
+        # + primer frame en la pipe. Medido en Pi 5 con IMX219.
+        time.sleep(1.5)
+
+        # Validacion 1: el proceso sigue vivo?
         if self._proceso.poll() is not None:
-            # El proceso murio: probablemente un flag no soportado
+            # rpicam-vid murio: los flags probablemente no son soportados.
             self._proceso = None
             return False
+
+        # Validacion 2: hay bytes MJPEG saliendo del pipe?
+        # Leemos un solo chunk y verificamos que contenga el marker JPEG
+        # de inicio (FFD8). NO intentamos decodificar un frame completo:
+        # a 1640x1232 los frames son ~80KB y los reads del pipe devuelven
+        # chunks parciales, por lo que armar un frame en el warm-up es
+        # timing-sensitive. La decodificacion real la hace leer() en el
+        # loop principal, con muchos mas intentos disponibles.
+        self._buffer = b""
+        try:
+            chunk = self._proceso.stdout.read(self.CHUNK_SIZE)
+        except Exception:
+            chunk = b""
+
+        if not chunk:
+            # Sin datos: el proceso arranco pero no produce nada. Puede
+            # ser una config invalida (formato/resolucion no soportados).
+            try:
+                self._proceso.terminate()
+                self._proceso.wait(timeout=2.0)
+            except Exception:
+                pass
+            self._proceso = None
+            return False
+
+        if self._JPEG_START not in chunk:
+            # Hay bytes pero no son MJPEG: config del codec incorrecta,
+            # o rpicam-vid esta emitiendo otra cosa. Cerramos.
+            try:
+                self._proceso.terminate()
+                self._proceso.wait(timeout=2.0)
+            except Exception:
+                pass
+            self._proceso = None
+            return False
+
+        # Bytes MJPEG confirmados. Guardamos el chunk en el buffer para
+        # que el primer leer() lo aproveche (contiene el arranque de al
+        # menos un frame). El loop principal armara el JPEG completo con
+        # los siguientes reads.
+        self._buffer = chunk
+        return True
 
         # Leer un frame de prueba
         self._buffer = b""

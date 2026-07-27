@@ -108,7 +108,7 @@ boca:
 # -----------------------------------------------------------------------------
 cabeza:
   # Pitch positivo = cabeza hacia abajo. Umbral en grados.
-  umbral_pitch_grados: 20
+  umbral_pitch_grados: 15
 
   # Duración mínima sostenida del cabeceo para contarlo (segundos)
   dur_min_cabeceo_seg: 0.8

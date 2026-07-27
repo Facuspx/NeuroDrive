@@ -227,6 +227,8 @@ class PublicadorMQ:
         drenar_al_iniciar: bool = True,
         eliminar_al_detener: bool = True,
         pitch_neutro: float = 0.0,
+        yaw_neutro: float = 0.0,
+        roll_neutro: float = 0.0,
     ) -> None:
         """
         Parametros
@@ -268,6 +270,16 @@ class PublicadorMQ:
             se interprete relativo a la pose neutra real.
             Default 0.0 = sin normalizacion (se envia el pitch crudo).
             El integrador (test_vision / main) lo setea tras calibrar.
+        yaw_neutro : float
+            Igual que pitch_neutro pero para el yaw. IMPORTANTE: el Core
+            usa umbral_yaw_max_grados=35 absoluto para invalidar cabeceos
+            cuando la cabeza esta muy girada. Sin normalizar, un conductor
+            con yaw_neutro=-35 (camara al costado) veria TODOS sus
+            cabeceos invalidados. Por eso el yaw se normaliza igual que
+            el pitch. Default 0.0 = sin normalizacion.
+        roll_neutro : float
+            Igual, para el roll. El Core no lo usa hoy en filtros, pero
+            lo enviamos normalizado por consistencia. Default 0.0.
         """
         self.config = config
 
@@ -329,8 +341,12 @@ class PublicadorMQ:
         # Es una decision de diseño deliberada, no un descuido.
         #
         # pitch_neutro = 0.0 (default) => sin normalizacion (pitch crudo).
-        # El integrador setea el pitch_neutro real tras la calibracion.
+        # yaw_neutro y roll_neutro funcionan igual: se restan al valor
+        # crudo antes de enviar el EventoVision al Core.
+        # El integrador setea los tres tras la calibracion.
         self.pitch_neutro = float(pitch_neutro)
+        self.yaw_neutro = float(yaw_neutro)
+        self.roll_neutro = float(roll_neutro)
 
         # Decidir el modo de operacion
         self.modo_simulado = (
@@ -517,25 +533,48 @@ class PublicadorMQ:
             self._mensajes_enviados, self._mensajes_descartados, self._errores,
         )
 
-    def setear_pitch_neutro(self, pitch_neutro: float) -> None:
+    def setear_neutros_cabeza(
+        self,
+        pitch_neutro: float,
+        yaw_neutro: float = 0.0,
+        roll_neutro: float = 0.0,
+    ) -> None:
         """
-        Actualiza el pitch_neutro usado para normalizar el pitch.
+        Actualiza los valores neutros usados para normalizar pitch/yaw/roll.
 
         Pensado para llamarse despues de la calibracion: el publicador se
         crea e inicia temprano (para detectar problemas de cola al
-        arrancar), pero el pitch_neutro recien se conoce cuando termina la
-        calibracion. Este metodo cierra esa brecha.
+        arrancar), pero los valores neutros recien se conocen cuando
+        termina la calibracion. Este metodo cierra esa brecha.
 
         Parametros
         ----------
         pitch_neutro : float
             Angulo de pitch de la pose neutra del conductor, en grados.
+        yaw_neutro : float
+            Idem para yaw. Default 0.0.
+        roll_neutro : float
+            Idem para roll. Default 0.0.
         """
-        anterior = self.pitch_neutro
+        p_ant, y_ant, r_ant = self.pitch_neutro, self.yaw_neutro, self.roll_neutro
         self.pitch_neutro = float(pitch_neutro)
+        self.yaw_neutro = float(yaw_neutro)
+        self.roll_neutro = float(roll_neutro)
         _log.info(
-            "PublicadorMQ: pitch_neutro actualizado %.1f -> %.1f grados",
-            anterior, self.pitch_neutro,
+            "PublicadorMQ: neutros actualizados "
+            "pitch %.1f -> %.1f, yaw %.1f -> %.1f, roll %.1f -> %.1f grados",
+            p_ant, self.pitch_neutro,
+            y_ant, self.yaw_neutro,
+            r_ant, self.roll_neutro,
+        )
+
+    # Alias de compatibilidad: mantiene el nombre viejo funcionando.
+    # Si en algun lugar del codigo se llama a setear_pitch_neutro(x),
+    # seguira funcionando (solo actualiza pitch, deja yaw/roll como estaban).
+    def setear_pitch_neutro(self, pitch_neutro: float) -> None:
+        """Alias de compatibilidad. Prefiera setear_neutros_cabeza."""
+        self.setear_neutros_cabeza(
+            pitch_neutro, self.yaw_neutro, self.roll_neutro,
         )
 
     def __enter__(self) -> "PublicadorMQ":
@@ -619,17 +658,25 @@ class PublicadorMQ:
         yaw = None
         roll = None
         if rostro and datos_cabeza is not None and datos_cabeza.valido:
-            # NORMALIZACION DEL PITCH (Opcion A de integracion):
-            # restamos el pitch_neutro de la calibracion. El Core recibe
-            # asi un pitch relativo a la pose neutra del conductor, y su
-            # umbral de cabeceo absoluto se interpreta correctamente.
-            # Si pitch_neutro es 0.0 (default), esto no cambia nada.
-            # yaw y roll NO se normalizan: el Core los usa como angulos
-            # absolutos (yaw para invalidar cabeceo si la cabeza esta
-            # muy girada; eso no depende de la pose neutra de pitch).
+            # NORMALIZACION DE ANGULOS (Opcion A de integracion):
+            # restamos los valores neutros de la calibracion. El Core
+            # recibe angulos relativos a la pose neutra del conductor y
+            # sus umbrales absolutos se interpretan correctamente.
+            #
+            # Motivo del yaw: el Core invalida cabeceos con abs(yaw) > 35.
+            # Si el conductor tiene la camara al costado y su yaw_neutro
+            # calibrado es -35, cualquier micro-movimiento tira el yaw
+            # crudo lejos de 0 y TODOS los cabeceos quedan invalidados.
+            # Normalizando, el filtro pasa a significar "35 grados desde
+            # la pose neutra real", que es el proposito buscado.
+            #
+            # Roll: el Core no lo usa hoy en filtros, pero lo normalizamos
+            # por consistencia (si ma�ana lo usa, ya viene bien).
+            #
+            # Con neutros = 0.0 (default), esto no cambia nada.
             pitch = datos_cabeza.pitch_deg - self.pitch_neutro
-            yaw = datos_cabeza.yaw_deg
-            roll = datos_cabeza.roll_deg
+            yaw = datos_cabeza.yaw_deg - self.yaw_neutro
+            roll = datos_cabeza.roll_deg - self.roll_neutro
 
         # Frote de ojos: flag booleano
         frote_activo = False
