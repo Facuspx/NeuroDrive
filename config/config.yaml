@@ -133,9 +133,9 @@ wearable:
   bpm_umbral_critico: 60       # Por debajo, riesgo alto
 
   # Timeouts para ACK del conductor según nivel de alerta
-  timeout_ack_leve_seg: 30
-  timeout_ack_medio_seg: 20
-  timeout_ack_critico_seg: 15
+  timeout_ack_leve_seg: 8      # antes 15
+  timeout_ack_medio_seg: 5     # antes 10
+  timeout_ack_critico_seg: 5   # nuevo
 
   # Heartbeat implícito: tiempo máximo sin recibir BPM antes de declarar caída
   timeout_heartbeat_seg: 10

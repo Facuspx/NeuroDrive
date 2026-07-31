@@ -421,15 +421,19 @@ class ComandoActuador:
     Múltiples comandos pueden estar activos simultáneamente (ej: vibrar + voz).
     """
     tipo: TipoComandoActuador
-    intensidad: int = 0           # 0-100 (para vibración y volumen)
+    intensidad: int = 0           # 0-100 (para vibracion y volumen)
     duracion_ms: int = 0          # 0 = continuo hasta nuevo comando
     mensaje_voz: str = ""         # Solo usado si tipo == REPRODUCIR_VOZ
+    id_secuencia: Optional[int] = None  # Solo en SECUENCIA_ACK: id que el
+                                        # wearable debe devolver en el ACK
 
     def __post_init__(self) -> None:
         if not (0 <= self.intensidad <= 100):
             raise ValueError(f"intensidad fuera de rango [0,100]: {self.intensidad}")
         if self.duracion_ms < 0:
-            raise ValueError(f"duración negativa: {self.duracion_ms}")
+            raise ValueError(f"duracion negativa: {self.duracion_ms}")
+        if self.id_secuencia is not None and self.id_secuencia < 0:
+            raise ValueError(f"id_secuencia negativo: {self.id_secuencia}")
 
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)

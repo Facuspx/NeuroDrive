@@ -639,6 +639,51 @@ def _():
     ]
     assert transiciones == esperado, f"Secuencia inesperada:\n{transiciones}\nvs\n{esperado}"
 
+print("\n--- Tests de recuperacion desde CRITICO ---")
+
+@_test("CRITICO emite SECUENCIA_ACK (via de recuperacion)")
+def _():
+    fsm = crear_fsm(EstadoFSM.ALERTA_MEDIA)
+    salida = fsm.procesar_evento(
+        ev_cabeceo(t=100, nivel_riesgo_bpm=NivelRiesgoBPM.CRITICO)
+    )
+    tipos = {c.tipo for c in salida.comandos}
+    assert TipoComandoActuador.SECUENCIA_ACK in tipos
+    seq = [c for c in salida.comandos
+           if c.tipo == TipoComandoActuador.SECUENCIA_ACK][0]
+    assert seq.id_secuencia is not None
+
+
+@_test("ACK incorrecto en CRITICO: se queda y re-desafia (no queda pegado)")
+def _():
+    fsm = crear_fsm(EstadoFSM.PRE_ALERTA)
+    fsm.procesar_evento(ev_bostezo(t=100))
+    fsm.procesar_evento(ev_microsueno(t=105))          # -> ALERTA_MEDIA
+    fsm.procesar_evento(
+        ev_cabeceo(t=110, nivel_riesgo_bpm=NivelRiesgoBPM.CRITICO)
+    )                                                   # -> CRITICO
+    assert fsm.get_estado_actual() == EstadoFSM.CRITICO
+    id_seq = fsm.get_estado_interno().id_secuencia_ack_pendiente
+    salida = fsm.procesar_evento(ev_ack_mal(t=120, id_seq=id_seq))
+    assert salida.estado_actual == EstadoFSM.CRITICO
+    tipos = {c.tipo for c in salida.comandos}
+    assert TipoComandoActuador.SECUENCIA_ACK in tipos, "deberia re-desafiar"
+    assert TipoComandoActuador.VIBRAR_FUERTE in tipos
+    nuevo = fsm.get_estado_interno().id_secuencia_ack_pendiente
+    assert nuevo is not None and nuevo != id_seq, "desafio nuevo con id distinto"
+
+
+@_test("ACK incorrecto en MEDIA escala a CRITICO con desafio nuevo")
+def _():
+    fsm = crear_fsm(EstadoFSM.PRE_ALERTA)
+    fsm.procesar_evento(ev_bostezo(t=100))
+    fsm.procesar_evento(ev_microsueno(t=105))          # -> ALERTA_MEDIA
+    id_med = fsm.get_estado_interno().id_secuencia_ack_pendiente
+    salida = fsm.procesar_evento(ev_ack_mal(t=110, id_seq=id_med))
+    assert salida.estado_actual == EstadoFSM.CRITICO
+    nuevo = fsm.get_estado_interno().id_secuencia_ack_pendiente
+    assert nuevo is not None and nuevo != id_med
+    assert TipoComandoActuador.SECUENCIA_ACK in {c.tipo for c in salida.comandos}
 
 # =============================================================================
 # RESUMEN

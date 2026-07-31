@@ -164,12 +164,11 @@ class DetectorMicrosuenos:
                 duracion = timestamp - self.ts_inicio_cierre
                 if duracion >= self.dur_min_microsueno:
                     self.microsueno_en_curso = True
+                    return True  # emite al CRUZAR el umbral (ojos aun cerrados)
 
         elif self.ojos_cerrados and ear > self.umbral_abrir:
             self.ojos_cerrados = False
-            if self.microsueno_en_curso:
-                self.microsueno_en_curso = False
-                return True
+            self.microsueno_en_curso = False
 
         return False
 
@@ -268,12 +267,11 @@ class DetectorCabeceos:
                 duracion = timestamp - self.ts_inicio_inclinacion
                 if duracion >= self.dur_min_cabeceo:
                     self.cabeceo_en_curso = True
+                    return True  # emite al CRUZAR el umbral (cabeza aun abajo)
 
         elif self.inclinado and pitch <= self.umbral_pitch * 0.85:
             self.inclinado = False
-            if self.cabeceo_en_curso:
-                self.cabeceo_en_curso = False
-                return True
+            self.cabeceo_en_curso = False
 
         return False
 

@@ -197,6 +197,7 @@ class FSM:
         self.config = config
         self.estado = EstadoInternoFSM(estado_actual=estado_inicial)
         self.log = logger or logging.getLogger("NeuroDrive.FSM")
+        self._reemitir = False  # re-emitir comandos sin cambio de estado (re-desafio)
 
     # ------------------------------------------------------------------
     # API PUBLICA
@@ -251,7 +252,11 @@ class FSM:
             self.estado.tiempo_acumulado_sin_eventos = 0.0
             self.estado.ultimo_timestamp_evaluacion = evento.timestamp
 
-        comandos = self._generar_comandos(evento, transicion)
+        # emitir puede ser True sin transicion, para re-desafiar en CRITICO
+        # tras un ACK incorrecto y no dejar la alarma pegada sin salida.
+        emitir = transicion or self._reemitir
+        comandos = self._generar_comandos(evento, emitir)
+        self._reemitir = False
 
         return SalidaFSM(
             timestamp=evento.timestamp,
@@ -315,8 +320,17 @@ class FSM:
         self.estado.id_secuencia_ack_pendiente = None
 
         if not ev.secuencia_correcta:
-            # ACK incorrecto: escalar un nivel
-            return self._escalar_un_nivel("ack_incorrecto")
+            # ACK incorrecto: el conductor esta confundido.
+            if self.estado.estado_actual == EstadoFSM.CRITICO:
+                # No hay nivel mas alto: seguir en CRITICO y RE-DESAFIAR,
+                # para no dejar la alarma pegada sin forma de confirmar.
+                self._solicitar_ack(ev.timestamp)
+                self._reemitir = True
+                return "ack_incorrecto_recritico"
+            # Escalar un nivel y pedir un desafio nuevo en el estado destino
+            motivo = self._escalar_un_nivel("ack_incorrecto")
+            self._solicitar_ack(ev.timestamp)
+            return motivo
 
         # ACK correcto: bajar a PRE_ALERTA (nunca directo a NORMAL)
         if self.estado.estado_actual in (
@@ -531,20 +545,28 @@ class FSM:
     # GENERACION DE COMANDOS
     # ------------------------------------------------------------------
 
+    def _asegurar_ack_pendiente(self, timestamp: float) -> Optional[int]:
+        """Garantiza un id de ACK pendiente al emitir un desafio. Si no hay
+        ninguno, solicita uno nuevo. Devuelve el id vigente."""
+        if self.estado.id_secuencia_ack_pendiente is None:
+            self._solicitar_ack(timestamp)
+        return self.estado.id_secuencia_ack_pendiente
+
     def _generar_comandos(
         self,
         evento: EventoEntradaFSM,
-        transicion: bool,
+        emitir: bool,
     ) -> List[ComandoActuador]:
         """
         Genera los comandos a despachar segun el estado actual.
 
         Reglas:
-          - En transicion a S2, S3, S4: emite los comandos de alerta + voz.
-          - En transicion a S0, S1, S5: emite APAGAR_TODO para silenciar.
-          - Sin transicion: no genera comandos (evita spam de actuadores).
+          - Al entrar a S2, S3, S4: emite los comandos de alerta + voz.
+          - Al entrar a S0, S1, S5: emite APAGAR_TODO para silenciar.
+          - emitir=False: no genera comandos (evita spam de actuadores).
+          - emitir puede ser True sin transicion (re-desafio en CRITICO).
         """
-        if not transicion:
+        if not emitir:
             return []
 
         estado = self.estado.estado_actual
@@ -584,6 +606,7 @@ class FSM:
                 ComandoActuador(
                     tipo=TipoComandoActuador.SECUENCIA_ACK,
                     intensidad=80,
+                    id_secuencia=self._asegurar_ack_pendiente(evento.timestamp),
                 ),
                 ComandoActuador(
                     tipo=TipoComandoActuador.REPRODUCIR_VOZ,
@@ -601,6 +624,11 @@ class FSM:
                 ComandoActuador(
                     tipo=TipoComandoActuador.BUZZER_CONTINUO,
                     intensidad=100,
+                ),
+                ComandoActuador(
+                    tipo=TipoComandoActuador.SECUENCIA_ACK,
+                    intensidad=100,
+                    id_secuencia=self._asegurar_ack_pendiente(evento.timestamp),
                 ),
                 ComandoActuador(
                     tipo=TipoComandoActuador.REPRODUCIR_VOZ,

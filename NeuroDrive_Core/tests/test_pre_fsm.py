@@ -262,11 +262,11 @@ def _():
 
     det.procesar(0.25, base)
     det.procesar(0.15, base + 0.1)  # cierra
-    # Sigue cerrado por 2 segundos (dur_min_microsueno = 1.5)
-    det.procesar(0.15, base + 1.0)
-    det.procesar(0.15, base + 1.8)
-    # Abre -> emite microsueño
-    assert det.procesar(0.25, base + 2.0)
+    assert not det.procesar(0.15, base + 1.0)   # 0.9s < 1.5s, aun no
+    # Al cruzar el umbral (ojos AUN cerrados) -> emite
+    assert det.procesar(0.15, base + 1.8)
+    # Al reabrir ya no re-emite
+    assert not det.procesar(0.25, base + 2.0)
 
 
 @_test("Cierre corto NO genera microsueño")
@@ -289,11 +289,11 @@ def _():
 
     det.procesar(0.25, base)
     det.procesar(0.15, base + 0.1)
-    det.procesar(0.15, base + 1.8)
-    # Abre y emite
-    assert det.procesar(0.25, base + 2.0)
-    # Siguientes frames no deben emitir nada
-    assert not det.procesar(0.25, base + 2.1)
+    # Emite al cruzar el umbral (ojos aun cerrados)
+    assert det.procesar(0.15, base + 1.8)
+    # Mientras siguen cerrados no re-emite
+    assert not det.procesar(0.15, base + 2.0)
+    # Al reabrir tampoco
     assert not det.procesar(0.25, base + 2.2)
 
 
@@ -361,10 +361,11 @@ def _():
     base = 1000.0
 
     det.procesar(5.0, 0.0, base)   # pitch bajo, no cabeceo
-    det.procesar(25.0, 0.0, base + 0.1)  # cruza umbral 20
-    det.procesar(25.0, 0.0, base + 1.0)  # sostenido (>0.8s)
-    # Baja el pitch -> cabeceo confirmado
-    assert det.procesar(5.0, 0.0, base + 1.5)
+    det.procesar(25.0, 0.0, base + 0.1)  # cruza umbral
+    # Al sostener > 0.8s (cabeza AUN abajo) -> emite
+    assert det.procesar(25.0, 0.0, base + 1.0)
+    # Al levantar ya no re-emite
+    assert not det.procesar(5.0, 0.0, base + 1.5)
 
 
 @_test("Cabeceo NO se cuenta si yaw esta muy girado")
@@ -781,11 +782,13 @@ def _():
     pre.procesar(_envelope_vision(ts=base3, ear_izq=0.25, ear_der=0.25, secuencia=300))
     pre.procesar(_envelope_vision(ts=base3 + 0.1, ear_izq=0.10, ear_der=0.10, secuencia=301))
     pre.procesar(_envelope_vision(ts=base3 + 1.0, ear_izq=0.10, ear_der=0.10, secuencia=302))
-    pre.procesar(_envelope_vision(ts=base3 + 1.8, ear_izq=0.10, ear_der=0.10, secuencia=303))
-    ep_microsueño = pre.procesar(
-        _envelope_vision(ts=base3 + 2.0, ear_izq=0.25, ear_der=0.25, secuencia=304)
+    # Al cruzar el umbral (ojos AUN cerrados) -> se emite el microsueno
+    ep_microsueno = pre.procesar(
+        _envelope_vision(ts=base3 + 1.8, ear_izq=0.10, ear_der=0.10, secuencia=303)
     )
-    assert ep_microsueño.microsueno, "microsueño deberia haberse detectado"
+    assert ep_microsueno.microsueno, "microsueno deberia detectarse al cruzar el umbral"
+    # Al reabrir ya no re-emite
+    pre.procesar(_envelope_vision(ts=base3 + 2.0, ear_izq=0.25, ear_der=0.25, secuencia=304))
 
     # BPM baja: el clasificador detecta CRITICO
     pre.procesar(_envelope_wearable(ts=base3 + 3, bpm=55, secuencia=500))
