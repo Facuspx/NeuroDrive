@@ -33,6 +33,15 @@ fsm:
   # Cantidad de cabeceos en ventana corta para escalar
   max_cabeceos_ventana_corta: 1
 
+  # Mejoras de manejo de somnolencia
+  calentamiento_senales_seg: 60.0        # ignorar parpadeos/min al arrancar
+  persistencia_senales_leves_seg: 20.0   # señal continua sostenida para PRE_ALERTA
+  perclos_confirmado:  0.35               # PERCLOS "parpados pesados"
+  perclos_confirmado_sostenido_seg: 30.0
+  max_eventos_severos_ventana:  3           # episodios para fatiga recurrente
+  ventana_episodios_seg: 900.0           # 15 min
+  umbral_respuesta_lenta_ms: 5000          # ACK correcto pero lento
+
 
 # -----------------------------------------------------------------------------
 # Captura de video y detección facial
@@ -133,7 +142,7 @@ wearable:
   bpm_umbral_critico: 60       # Por debajo, riesgo alto
 
   # Timeouts para ACK del conductor según nivel de alerta
-  timeout_ack_leve_seg: 8      # antes 15
+  timeout_ack_leve_seg: 9      # antes 15
   timeout_ack_medio_seg: 5     # antes 10
   timeout_ack_critico_seg: 5   # nuevo
 

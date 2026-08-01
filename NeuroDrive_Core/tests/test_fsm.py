@@ -78,11 +78,11 @@ def ev_normal(t: float, **kwargs) -> EventoProcesado:
         bostezo=False,
         cabeceo=False,
         parpadeo=True,
-        parpadeos_por_minuto=17.0,
+        parpadeos_por_minuto=8.0,
         perclos=0.1,
         bostezos_ventana_larga=0,
         bpm_actual=72,
-        nivel_riesgo_bpm=NivelRiesgoBPM.NORMAL,
+        nivel_riesgo_bpm=NivelRiesgoBPM.ALERTA,
         ventana_no_confiable=False,
         vision_disponible=True,
         wearable_disponible=True,
@@ -96,7 +96,8 @@ def ev_microsueno(t: float, **kwargs) -> EventoProcesado:
 
 
 def ev_bostezo(t: float, **kwargs) -> EventoProcesado:
-    return ev_normal(t, bostezo=True, **kwargs)
+    # Representa "bostezos acumulados confirmados" (3 en ventana larga)
+    return ev_normal(t, bostezo=True, bostezos_ventana_larga=3, **kwargs)
 
 
 def ev_cabeceo(t: float, **kwargs) -> EventoProcesado:
@@ -104,8 +105,10 @@ def ev_cabeceo(t: float, **kwargs) -> EventoProcesado:
 
 
 def ev_señales_leves(t: float, **kwargs) -> EventoProcesado:
-    """Parpadeos bajos: señal leve sin evento confirmado."""
-    return ev_normal(t, parpadeos_por_minuto=8.0, **kwargs)
+    fsm = crear_fsm()
+    salida = fsm.procesar_evento(ev_microsueno(t=100))
+    assert salida.transicion_ocurrio
+    assert salida.motivo_transicion != ""
 
 
 def ev_ack_ok(t: float, id_seq: int) -> EventoAckWearable:
@@ -178,24 +181,28 @@ print("\n--- Tests de transicion S0 -> S1 ---")
 @_test("S0 -> S1 por parpadeos bajos")
 def _():
     fsm = crear_fsm()
-    salida = fsm.procesar_evento(ev_señales_leves(t=100))
+    fsm.procesar_evento(ev_normal(t=100))                      # arranque
+    fsm.procesar_evento(ev_normal(t=170, perclos=0.32))        # arma la señal
+    salida = fsm.procesar_evento(ev_normal(t=195, perclos=0.32))  # sostenida 25s
     assert salida.estado_actual == EstadoFSM.PRE_ALERTA
-    assert salida.transicion_ocurrio
+    #assert salida.transicion_ocurrio
 
 
 @_test("S0 -> S1 por BPM en nivel ALERTA")
 def _():
     fsm = crear_fsm()
-    salida = fsm.procesar_evento(
-        ev_normal(t=100, nivel_riesgo_bpm=NivelRiesgoBPM.ALERTA)
-    )
+    fsm.procesar_evento(ev_normal(t=100))                      # arranque
+    fsm.procesar_evento(ev_normal(t=170, perclos=0.32))        # arma la señal
+    salida = fsm.procesar_evento(ev_normal(t=195, perclos=0.32))  # sostenida 25s
     assert salida.estado_actual == EstadoFSM.PRE_ALERTA
 
 
 @_test("S0 -> S1 por PERCLOS alto")
 def _():
     fsm = crear_fsm()
-    salida = fsm.procesar_evento(ev_normal(t=100, perclos=0.4))
+    fsm.procesar_evento(ev_normal(t=100))                      # arranque
+    fsm.procesar_evento(ev_normal(t=170, perclos=0.32))        # arma la señal
+    salida = fsm.procesar_evento(ev_normal(t=195, perclos=0.32))  # sostenida 25s
     assert salida.estado_actual == EstadoFSM.PRE_ALERTA
 
 
@@ -227,8 +234,13 @@ def _():
 @_test("S0 -> S2 por cabeceo severo desde NORMAL")
 def _():
     fsm = crear_fsm(EstadoFSM.NORMAL)
+    # Sin corroboracion ocular: solo PRE_ALERTA
     salida = fsm.procesar_evento(ev_cabeceo(t=100))
-    assert salida.estado_actual == EstadoFSM.ALERTA_LEVE
+    assert salida.estado_actual == EstadoFSM.PRE_ALERTA
+    # Con PERCLOS elevado: via rapida a ALERTA_LEVE
+    fsm2 = crear_fsm(EstadoFSM.NORMAL)
+    salida2 = fsm2.procesar_evento(ev_cabeceo(t=100, perclos=0.35))
+    assert salida2.estado_actual == EstadoFSM.ALERTA_LEVE
 
 # =============================================================================
 # TESTS: S1 PRE_ALERTA -> S2 ALERTA_LEVE
@@ -619,33 +631,36 @@ def _():
     s = fsm.procesar_evento(ev_normal(t=base))
     transiciones.append((s.estado_actual.name, s.transicion_ocurrio))
 
-    # 2. Aparecen parpadeos bajos sostenidos -> PRE_ALERTA
-    s = fsm.procesar_evento(ev_señales_leves(t=base + 10))
+    # 2. PERCLOS elevado sostenido -> PRE_ALERTA (con persistencia)
+    s = fsm.procesar_evento(ev_normal(t=base + 10, perclos=0.32))
+    transiciones.append((s.estado_actual.name, s.transicion_ocurrio))
+    s = fsm.procesar_evento(ev_normal(t=base + 35, perclos=0.32))
     transiciones.append((s.estado_actual.name, s.transicion_ocurrio))
 
-    # 3. Bostezo -> ALERTA_LEVE
-    s = fsm.procesar_evento(ev_bostezo(t=base + 20))
+    # 3. Bostezos acumulados -> ALERTA_LEVE
+    s = fsm.procesar_evento(ev_bostezo(t=base + 45))
     transiciones.append((s.estado_actual.name, s.transicion_ocurrio))
 
     # 4. No responde ACK, microsueño -> ALERTA_MEDIA
-    s = fsm.procesar_evento(ev_microsueno(t=base + 30))
+    s = fsm.procesar_evento(ev_microsueno(t=base + 55))
     transiciones.append((s.estado_actual.name, s.transicion_ocurrio))
 
     # 5. Cabeceo + BPM critico -> CRITICO
     s = fsm.procesar_evento(
-        ev_cabeceo(t=base + 40, nivel_riesgo_bpm=NivelRiesgoBPM.CRITICO)
+        ev_cabeceo(t=base + 65, nivel_riesgo_bpm=NivelRiesgoBPM.CRITICO)
     )
     transiciones.append((s.estado_actual.name, s.transicion_ocurrio))
 
     # 6. Conductor reacciona con ACK correcto -> PRE_ALERTA
     id_seq = fsm.get_estado_interno().id_secuencia_ack_pendiente
-    s = fsm.procesar_evento(ev_ack_ok(t=base + 50, id_seq=id_seq))
+    s = fsm.procesar_evento(ev_ack_ok(t=base + 75, id_seq=id_seq))
     transiciones.append((s.estado_actual.name, s.transicion_ocurrio))
 
-    # Verificar la secuencia completa
+
     esperado = [
         ("NORMAL", False),
-        ("PRE_ALERTA", True),
+        ("NORMAL", False),        # señal armada, persistencia en curso
+        ("PRE_ALERTA", True),     # señal sostenida 25s
         ("ALERTA_LEVE", True),
         ("ALERTA_MEDIA", True),
         ("CRITICO", True),
@@ -717,6 +732,75 @@ def _():
     nuevo = fsm.get_estado_interno().id_secuencia_ack_pendiente
     assert nuevo is not None and nuevo != id_med
     assert TipoComandoActuador.SECUENCIA_ACK in {c.tipo for c in salida.comandos}
+
+print("\n--- Tests de manejo de somnolencia (mejoras) ---")
+
+
+@_test("Parpadeos bajos durante el calentamiento NO disparan PRE_ALERTA")
+def _():
+    fsm = crear_fsm()
+    fsm.procesar_evento(ev_normal(t=100))
+    fsm.procesar_evento(ev_normal(t=110, parpadeos_por_minuto=5.0))
+    salida = fsm.procesar_evento(ev_normal(t=135, parpadeos_por_minuto=5.0))
+    assert salida.estado_actual == EstadoFSM.NORMAL
+
+
+@_test("Señal leve interrumpida resetea la persistencia")
+def _():
+    fsm = crear_fsm()
+    fsm.procesar_evento(ev_normal(t=100))
+    fsm.procesar_evento(ev_normal(t=170, perclos=0.32))
+    fsm.procesar_evento(ev_normal(t=180, perclos=0.1))   # se corta
+    salida = fsm.procesar_evento(ev_normal(t=195, perclos=0.32))
+    assert salida.estado_actual == EstadoFSM.NORMAL
+
+
+@_test("PERCLOS >=0.35 sostenido 30s escala a ALERTA_LEVE con desafio")
+def _():
+    fsm = crear_fsm(EstadoFSM.PRE_ALERTA)
+    fsm.procesar_evento(ev_normal(t=100, perclos=0.40))
+    fsm.procesar_evento(ev_normal(t=115, perclos=0.40))
+    salida = fsm.procesar_evento(ev_normal(t=131, perclos=0.40))
+    assert salida.estado_actual == EstadoFSM.ALERTA_LEVE
+    assert TipoComandoActuador.SECUENCIA_ACK in {c.tipo for c in salida.comandos}
+
+
+@_test("Bostezo UNICO desde PRE_ALERTA no escala")
+def _():
+    fsm = crear_fsm(EstadoFSM.PRE_ALERTA)
+    salida = fsm.procesar_evento(
+        ev_normal(t=100, bostezo=True, bostezos_ventana_larga=1)
+    )
+    assert salida.estado_actual == EstadoFSM.PRE_ALERTA
+
+
+@_test("Fatiga recurrente: ACK correcto emite voz + supervisor; 4to severo -> MEDIA")
+def _():
+    fsm = crear_fsm()
+    fsm.procesar_evento(ev_normal(t=10))
+    for t in (100, 200, 300):
+        fsm.procesar_evento(ev_microsueno(t=t))
+        id_seq = fsm.get_estado_interno().id_secuencia_ack_pendiente
+        salida = fsm.procesar_evento(ev_ack_ok(t=t + 5, id_seq=id_seq))
+    # El 3er ACK ya lleva la advertencia (3 episodios en ventana)
+    tipos = {c.tipo for c in salida.comandos}
+    assert TipoComandoActuador.REPRODUCIR_VOZ in tipos
+    assert TipoComandoActuador.NOTIFICAR_SUPERVISOR in tipos
+    # 4to evento severo: piso de escalada -> ALERTA_MEDIA directo
+    salida = fsm.procesar_evento(ev_microsueno(t=400))
+    assert salida.estado_actual == EstadoFSM.ALERTA_MEDIA
+
+
+@_test("ACK correcto pero LENTO baja solo un nivel")
+def _():
+    fsm = crear_fsm(EstadoFSM.PRE_ALERTA)
+    fsm.procesar_evento(ev_bostezo(t=100))          # -> ALERTA_LEVE
+    fsm.procesar_evento(ev_microsueno(t=105))       # -> ALERTA_MEDIA
+    id_seq = fsm.get_estado_interno().id_secuencia_ack_pendiente
+    lento = EventoAckWearable(timestamp=110, id_secuencia=id_seq,
+                              secuencia_correcta=True, tiempo_respuesta_ms=7000)
+    salida = fsm.procesar_evento(lento)
+    assert salida.estado_actual == EstadoFSM.ALERTA_LEVE, "lento baja 1 nivel, no a PRE_ALERTA"
 
 # =============================================================================
 # RESUMEN

@@ -92,6 +92,15 @@ class ConfigFSM:
     max_bostezos_ventana_corta: int = 3
     max_cabeceos_ventana_corta: int = 1
 
+    # Mejoras de manejo de somnolencia
+    calentamiento_senales_seg: float = 60.0        # ignorar parpadeos/min al arrancar
+    persistencia_senales_leves_seg: float = 20.0   # señal continua sostenida para PRE_ALERTA
+    perclos_confirmado: float = 0.35               # PERCLOS "parpados pesados"
+    perclos_confirmado_sostenido_seg: float = 30.0
+    max_eventos_severos_ventana: int = 3           # episodios para fatiga recurrente
+    ventana_episodios_seg: float = 900.0           # 15 min
+    umbral_respuesta_lenta_ms: int = 5000          # ACK correcto pero lento
+
     @classmethod
     def desde_dict(cls, config: Dict[str, Any]) -> ConfigFSM:
         """Construye una ConfigFSM desde el dict cargado de config.yaml.
@@ -168,6 +177,11 @@ class EstadoInternoFSM:
     # Contador interno de secuencias de ACK
     contador_secuencia_ack: int = 0
 
+    ts_primer_evento: float = 0.0
+    ts_inicio_senales: float = 0.0
+    ts_inicio_perclos_alto: float = 0.0
+    episodios_severos: List[float] = field(default_factory=list)
+
 
 # =============================================================================
 #                              CLASE PRINCIPAL
@@ -198,6 +212,8 @@ class FSM:
         self.estado = EstadoInternoFSM(estado_actual=estado_inicial)
         self.log = logger or logging.getLogger("NeuroDrive.FSM")
         self._reemitir = False  # re-emitir comandos sin cambio de estado (re-desafio)
+        self._comandos_extra: List[ComandoActuador] = []
+        self._perclos_confirmado_flag = False
 
     # ------------------------------------------------------------------
     # API PUBLICA
@@ -219,6 +235,9 @@ class FSM:
                 evento.timestamp,
                 self.estado.ultimo_timestamp,
             )
+
+        if self.estado.ts_primer_evento == 0.0:
+            self.estado.ts_primer_evento = evento.timestamp
 
         estado_anterior = self.estado.estado_actual
 
@@ -256,6 +275,9 @@ class FSM:
         # tras un ACK incorrecto y no dejar la alarma pegada sin salida.
         emitir = transicion or self._reemitir
         comandos = self._generar_comandos(evento, emitir)
+        if emitir and self._comandos_extra:
+            comandos = list(comandos) + self._comandos_extra
+        self._comandos_extra = []
         self._reemitir = False
 
         return SalidaFSM(
@@ -332,14 +354,30 @@ class FSM:
             self._solicitar_ack(ev.timestamp)
             return motivo
 
-        # ACK correcto: bajar a PRE_ALERTA (nunca directo a NORMAL)
+        # ACK correcto
         if self.estado.estado_actual in (
             EstadoFSM.ALERTA_LEVE,
             EstadoFSM.ALERTA_MEDIA,
             EstadoFSM.CRITICO,
         ):
-            self.estado.estado_actual = EstadoFSM.PRE_ALERTA
-            return f"ack_correcto:{ev.id_secuencia}"
+            if ev.tiempo_respuesta_ms > self.config.umbral_respuesta_lenta_ms:
+                # Correcto pero LENTO: signo de deterioro. Baja solo un nivel.
+                self._bajar_un_nivel_por_ack()
+                motivo = f"ack_correcto_lento:{ev.id_secuencia}"
+            else:
+                self.estado.estado_actual = EstadoFSM.PRE_ALERTA
+                motivo = f"ack_correcto:{ev.id_secuencia}"
+            if self._fatiga_recurrente(ev.timestamp):
+                # Responde pero se sigue durmiendo: responsividad != aptitud
+                self._comandos_extra = [
+                    ComandoActuador(
+                        tipo=TipoComandoActuador.REPRODUCIR_VOZ,
+                        mensaje_voz="Fatiga recurrente detectada, detente a descansar",
+                    ),
+                    ComandoActuador(tipo=TipoComandoActuador.NOTIFICAR_SUPERVISOR),
+                ]
+                motivo += "_fatiga_recurrente"
+            return motivo
         return ""
 
     def _procesar_evento_normal(self, ev: EventoProcesado) -> str:
@@ -350,6 +388,8 @@ class FSM:
 
         # Histeresis de bajada: actualizar acumulador de tiempo sin eventos
         self._actualizar_acumulador_tiempo(ev)
+        # PERCLOS sostenido (parpados pesados sin eventos discretos)
+        self._actualizar_perclos_confirmado(ev)
 
         # Despachar por estado
         if self.estado.estado_actual == EstadoFSM.NORMAL:
@@ -369,25 +409,54 @@ class FSM:
     # ------------------------------------------------------------------
 
     def _desde_normal(self, ev: EventoProcesado) -> str:
-        """S0 -> S2 por evento severo (microsueno/cabeceo); S0 -> S1 por
-        señales leves sostenidas."""
-        # Un evento severo confirmado (microsueno o cabeceo) NO puede perderse
-        # solo por estar en NORMAL. Con la deteccion en borde de entrada llega
-        # apenas ocurre (ojos cerrados / cabeza abajo), y muchas veces ocurre
-        # estando aun en NORMAL. Escala directo a ALERTA_LEVE.
-        if not ev.ventana_no_confiable and (ev.microsueno or ev.cabeceo):
+        """S0 -> S2 por evento severo corroborado; S0 -> S1 por cabeceo sin
+        corroborar o por señales leves sostenidas."""
+        if ev.ventana_no_confiable:
+            return ""
+        corroborado = ev.perclos is not None and ev.perclos >= 0.3
+        # Via rapida: microsueno siempre (ojos cerrados es inequivoco);
+        # cabeceo solo con corroboracion ocular (PERCLOS elevado), para no
+        # confundir miradas al tablero con cabeceos de sueño.
+        if ev.microsueno or (ev.cabeceo and corroborado):
+            recurrente = self._fatiga_recurrente(ev.timestamp)
+            self._registrar_episodio(ev.timestamp)
+            if recurrente:
+                self.estado.estado_actual = EstadoFSM.ALERTA_MEDIA
+                self._solicitar_ack(ev.timestamp)
+                return "severo_fatiga_recurrente"
             self.estado.estado_actual = EstadoFSM.ALERTA_LEVE
             self._solicitar_ack(ev.timestamp)
             return "evento_severo_desde_normal"
-        if self._hay_señales_leves(ev):
+        # Cabeceo sin corroboracion: señal discreta -> PRE_ALERTA inmediato
+        if ev.cabeceo:
             self.estado.estado_actual = EstadoFSM.PRE_ALERTA
-            return "señales_leves_detectadas"
+            self.estado.ts_inicio_senales = 0.0
+            return "cabeceo_sin_corroboracion"
+        # Señales continuas: requieren persistencia
+        if self._senales_continuas(ev):
+            if self.estado.ts_inicio_senales == 0.0:
+                self.estado.ts_inicio_senales = ev.timestamp
+            elif (
+                ev.timestamp - self.estado.ts_inicio_senales
+                >= self.config.persistencia_senales_leves_seg
+            ):
+                self.estado.estado_actual = EstadoFSM.PRE_ALERTA
+                self.estado.ts_inicio_senales = 0.0
+                return "senales_leves_sostenidas"
+        else:
+            self.estado.ts_inicio_senales = 0.0
         return ""
 
     def _desde_pre_alerta(self, ev: EventoProcesado) -> str:
-        """S1 -> S0 por tiempo sin eventos; S1 -> S2 por evento confirmado."""
-        # Evento confirmado escala a ALERTA_LEVE
+        """S1 -> S0 por tiempo sin eventos; S1 -> S2/S3 por evento confirmado."""
+        # Evento confirmado escala; con fatiga recurrente, piso mas alto
         if self._hay_evento_confirmado(ev):
+            recurrente = self._fatiga_recurrente(ev.timestamp)
+            self._registrar_episodio(ev.timestamp)
+            if recurrente:
+                self.estado.estado_actual = EstadoFSM.ALERTA_MEDIA
+                self._solicitar_ack(ev.timestamp)
+                return "confirmado_fatiga_recurrente"
             self.estado.estado_actual = EstadoFSM.ALERTA_LEVE
             self._solicitar_ack(ev.timestamp)
             return "evento_confirmado"
@@ -403,8 +472,9 @@ class FSM:
 
     def _desde_alerta_leve(self, ev: EventoProcesado) -> str:
         """S2 -> S3 por timeout ACK o por escalada por acumulacion."""
-        # Microsueño o segundo bostezo escala directo (regla 3)
+        # Evento severo estando en alerta escala directo
         if ev.microsueno or self._hay_evento_confirmado(ev):
+            self._registrar_episodio(ev.timestamp)
             self.estado.estado_actual = EstadoFSM.ALERTA_MEDIA
             self._solicitar_ack(ev.timestamp)
             return "evento_severo_en_alerta"
@@ -451,23 +521,72 @@ class FSM:
     # PREDICADOS DE EVENTOS
     # ------------------------------------------------------------------
 
-    def _hay_señales_leves(self, ev: EventoProcesado) -> bool:
-        """Para subir de S0 a S1: señales sutiles de fatiga."""
+    def _senales_continuas(self, ev: EventoProcesado) -> bool:
+        """Señales leves CONTINUAS (metricas de ventana). Requieren
+        persistencia antes de declarar PRE_ALERTA. Los parpadeos/min se
+        ignoran durante el calentamiento (ventana incompleta al arrancar)."""
         if ev.ventana_no_confiable:
             return False
-        # Parpadeos bajos
+        en_calentamiento = (
+            ev.timestamp - self.estado.ts_primer_evento
+            < self.config.calentamiento_senales_seg
+        )
         if (
-            ev.parpadeos_por_minuto is not None
+            not en_calentamiento
+            and ev.parpadeos_por_minuto is not None
             and ev.parpadeos_por_minuto < 10
         ):
             return True
-        # BPM levemente bajo
         if ev.nivel_riesgo_bpm == NivelRiesgoBPM.ALERTA:
             return True
-        # PERCLOS alto (mas de 30% del tiempo con ojos cerrados)
         if ev.perclos is not None and ev.perclos > 0.3:
             return True
         return False
+
+    def _actualizar_perclos_confirmado(self, ev: EventoProcesado) -> None:
+        """Trackea PERCLOS sostenido >= umbral confirmado (somnolencia de
+        parpados pesados que nunca cruza un evento discreto)."""
+        if (
+            ev.ventana_no_confiable
+            or ev.perclos is None
+            or ev.perclos < self.config.perclos_confirmado
+        ):
+            self.estado.ts_inicio_perclos_alto = 0.0
+            self._perclos_confirmado_flag = False
+            return
+        if self.estado.ts_inicio_perclos_alto == 0.0:
+            self.estado.ts_inicio_perclos_alto = ev.timestamp
+        self._perclos_confirmado_flag = (
+            ev.timestamp - self.estado.ts_inicio_perclos_alto
+            >= self.config.perclos_confirmado_sostenido_seg
+        )
+
+    def _registrar_episodio(self, ts: float) -> None:
+        self.estado.episodios_severos.append(ts)
+        self._purgar_episodios(ts)
+
+    def _purgar_episodios(self, ts: float) -> None:
+        limite = ts - self.config.ventana_episodios_seg
+        self.estado.episodios_severos = [
+            t for t in self.estado.episodios_severos if t >= limite
+        ]
+
+    def _fatiga_recurrente(self, ts: float) -> bool:
+        """True si YA hay N episodios severos en la ventana larga."""
+        self._purgar_episodios(ts)
+        return (
+            len(self.estado.episodios_severos)
+            >= self.config.max_eventos_severos_ventana
+        )
+
+    def _bajar_un_nivel_por_ack(self) -> None:
+        e = self.estado.estado_actual
+        if e == EstadoFSM.CRITICO:
+            self.estado.estado_actual = EstadoFSM.ALERTA_MEDIA
+        elif e == EstadoFSM.ALERTA_MEDIA:
+            self.estado.estado_actual = EstadoFSM.ALERTA_LEVE
+        elif e == EstadoFSM.ALERTA_LEVE:
+            self.estado.estado_actual = EstadoFSM.PRE_ALERTA
 
     def _hay_evento_confirmado(self, ev: EventoProcesado) -> bool:
         """Para subir de S1 a S2: evento discreto severo."""
@@ -475,10 +594,14 @@ class FSM:
             return False
         if ev.microsueno:
             return True
-        if ev.bostezo:
-            return True
+        # Bostezo UNICO ya no confirma (fisiologia normal); solo la
+        # acumulacion en ventana larga (abajo).
         if ev.cabeceo:
             return True
+        # PERCLOS sostenido: somnolencia de parpados pesados
+        if self._perclos_confirmado_flag:
+            return True
+        
         # Acumulacion de bostezos
         if (
             ev.bostezos_ventana_larga

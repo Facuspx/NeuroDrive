@@ -75,6 +75,13 @@ def _construir_config_fsm(config) -> ConfigFSM:
         max_microsuenos_ventana_corta=getattr(fsm, "max_microsuenos_ventana_corta", 1),
         max_bostezos_ventana_corta=getattr(fsm, "max_bostezos_ventana_corta", 3),
         max_cabeceos_ventana_corta=getattr(fsm, "max_cabeceos_ventana_corta", 1),
+        calentamiento_senales_seg=getattr(fsm, "calentamiento_senales_seg", 60.0),
+        persistencia_senales_leves_seg=getattr(fsm, "persistencia_senales_leves_seg", 20.0),
+        perclos_confirmado=getattr(fsm, "perclos_confirmado", 0.35),
+        perclos_confirmado_sostenido_seg=getattr(fsm, "perclos_confirmado_sostenido_seg", 30.0),
+        max_eventos_severos_ventana=getattr(fsm, "max_eventos_severos_ventana", 3),
+        ventana_episodios_seg=getattr(fsm, "ventana_episodios_seg", 900.0),
+        umbral_respuesta_lenta_ms=getattr(fsm, "umbral_respuesta_lenta_ms", 5000),
     )
 
 
