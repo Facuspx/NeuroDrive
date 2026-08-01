@@ -216,6 +216,19 @@ def _():
     )
     assert salida.estado_actual == EstadoFSM.NORMAL
 
+@_test("S0 -> S2 por microsueno severo desde NORMAL")
+def _():
+    fsm = crear_fsm(EstadoFSM.NORMAL)
+    salida = fsm.procesar_evento(ev_microsueno(t=100))
+    assert salida.estado_actual == EstadoFSM.ALERTA_LEVE
+    assert fsm.get_estado_interno().id_secuencia_ack_pendiente is not None
+
+
+@_test("S0 -> S2 por cabeceo severo desde NORMAL")
+def _():
+    fsm = crear_fsm(EstadoFSM.NORMAL)
+    salida = fsm.procesar_evento(ev_cabeceo(t=100))
+    assert salida.estado_actual == EstadoFSM.ALERTA_LEVE
 
 # =============================================================================
 # TESTS: S1 PRE_ALERTA -> S2 ALERTA_LEVE
@@ -252,6 +265,7 @@ def _():
     tipos = {c.tipo for c in salida.comandos}
     assert TipoComandoActuador.VIBRAR_LEVE in tipos
     assert TipoComandoActuador.REPRODUCIR_VOZ in tipos
+    assert TipoComandoActuador.SECUENCIA_ACK in tipos   # ahora LEVE desafia
 
 
 # =============================================================================
@@ -652,7 +666,26 @@ def _():
     seq = [c for c in salida.comandos
            if c.tipo == TipoComandoActuador.SECUENCIA_ACK][0]
     assert seq.id_secuencia is not None
-
+    
+@_test("ACK correcto en CRITICO tras vencer el timeout: recupera (no drift)")
+def _():
+    fsm = crear_fsm(EstadoFSM.PRE_ALERTA)
+    fsm.procesar_evento(ev_bostezo(t=100))
+    fsm.procesar_evento(ev_microsueno(t=105))          # -> ALERTA_MEDIA
+    fsm.procesar_evento(
+        ev_cabeceo(t=110, nivel_riesgo_bpm=NivelRiesgoBPM.CRITICO)
+    )                                                   # -> CRITICO
+    assert fsm.get_estado_actual() == EstadoFSM.CRITICO
+    # Pasa el timeout critico sin respuesta -> se re-emite el desafio con id nuevo
+    salida = fsm.procesar_evento(ev_normal(t=200))
+    seqs = [c for c in salida.comandos
+            if c.tipo == TipoComandoActuador.SECUENCIA_ACK]
+    assert seqs, "deberia re-emitir el desafio tras el timeout"
+    id_vigente = fsm.get_estado_interno().id_secuencia_ack_pendiente
+    assert seqs[0].id_secuencia == id_vigente, "el desafio re-emitido lleva el id vigente"
+    # El conductor responde con el id vigente -> recupera
+    salida2 = fsm.procesar_evento(ev_ack_ok(t=205, id_seq=id_vigente))
+    assert salida2.estado_actual == EstadoFSM.PRE_ALERTA
 
 @_test("ACK incorrecto en CRITICO: se queda y re-desafia (no queda pegado)")
 def _():

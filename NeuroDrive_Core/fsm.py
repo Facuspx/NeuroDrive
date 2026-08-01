@@ -369,7 +369,16 @@ class FSM:
     # ------------------------------------------------------------------
 
     def _desde_normal(self, ev: EventoProcesado) -> str:
-        """S0 -> S1 si hay señales leves sostenidas."""
+        """S0 -> S2 por evento severo (microsueno/cabeceo); S0 -> S1 por
+        señales leves sostenidas."""
+        # Un evento severo confirmado (microsueno o cabeceo) NO puede perderse
+        # solo por estar en NORMAL. Con la deteccion en borde de entrada llega
+        # apenas ocurre (ojos cerrados / cabeza abajo), y muchas veces ocurre
+        # estando aun en NORMAL. Escala directo a ALERTA_LEVE.
+        if not ev.ventana_no_confiable and (ev.microsueno or ev.cabeceo):
+            self.estado.estado_actual = EstadoFSM.ALERTA_LEVE
+            self._solicitar_ack(ev.timestamp)
+            return "evento_severo_desde_normal"
         if self._hay_señales_leves(ev):
             self.estado.estado_actual = EstadoFSM.PRE_ALERTA
             return "señales_leves_detectadas"
@@ -418,23 +427,24 @@ class FSM:
             self._solicitar_ack(ev.timestamp)
             return "cabeceo_confirmado_bpm_critico"
 
-        # Timeout del ACK con BPM no normal
+        # Timeout del ACK: el conductor no responde el desafio. La falta de
+        # respuesta ya es señal de somnolencia, asi que escala a CRITICO sin
+        # importar el BPM (en la muñeca suele ser normal o desconocido).
         if self._timeout_ack(ev.timestamp, self.config.timeout_ack_medio_seg):
-            if ev.nivel_riesgo_bpm in (NivelRiesgoBPM.ALERTA, NivelRiesgoBPM.CRITICO):
-                self.estado.estado_actual = EstadoFSM.CRITICO
-                self._solicitar_ack(ev.timestamp)
-                return "timeout_ack_medio_bpm_bajo"
-            # Sin BPM bajo, igual escala pero mas lento (refrescamos solicitud)
+            self.estado.estado_actual = EstadoFSM.CRITICO
             self._solicitar_ack(ev.timestamp)
-            return ""
+            return "timeout_ack_medio_sin_respuesta"
         return ""
 
     def _desde_critico(self, ev: EventoProcesado) -> str:
         """S4 -> S1 solo por ACK correcto (manejado en _procesar_ack)."""
-        # En CRITICO solo el ACK puede bajar el estado.
-        # Refrescamos la solicitud de ACK si pasaron mas del timeout
+        # En CRITICO solo el ACK baja el estado. Si el desafio expiro, lo
+        # RE-EMITIMOS (nuevo id + reenvio a la pulsera) para mantener el id
+        # sincronizado. Cambiar el id sin reenviar dejaba la alarma pegada:
+        # la respuesta del conductor nunca matcheaba el id nuevo.
         if self._timeout_ack(ev.timestamp, self.config.timeout_ack_critico_seg):
             self._solicitar_ack(ev.timestamp)
+            self._reemitir = True
         return ""
 
     # ------------------------------------------------------------------
@@ -584,6 +594,11 @@ class FSM:
                     tipo=TipoComandoActuador.VIBRAR_LEVE,
                     intensidad=30,
                     duracion_ms=1500,
+                ),
+                ComandoActuador(
+                    tipo=TipoComandoActuador.SECUENCIA_ACK,
+                    intensidad=50,
+                    id_secuencia=self._asegurar_ack_pendiente(evento.timestamp),
                 ),
                 ComandoActuador(
                     tipo=TipoComandoActuador.REPRODUCIR_VOZ,

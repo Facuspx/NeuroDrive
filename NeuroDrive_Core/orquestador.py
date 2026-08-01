@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Optional
 
 from common.contratos import (
@@ -147,6 +147,16 @@ class Orquestador:
     def _procesar_envelope(self, envelope) -> None:
         try:
             ev = envelope.evento
+            # RELOJ UNICO PARA LA FSM: usamos el timestamp de RECEPCION del
+            # Gestor (tiempo real), no el del origen. Asi la vision (que en
+            # modo video trae su propio reloj arrancando en cero) y el wearable
+            # (tiempo real) quedan en la misma linea de tiempo, y la FSM no ve
+            # "eventos del pasado" ni deltas absurdos en sus timeouts.
+            # El PreFSM ya calculo sus ventanas con el reloj del origen ANTES
+            # de emitir el EventoProcesado, asi que no se afecta (66 parpadeos,
+            # PERCLOS, etc. intactos).
+            ts_fsm = envelope.timestamp_recepcion or envelope.timestamp_origen
+
             # El PreFSM procesa SIEMPRE: actualiza su estado interno
             # (disponibilidad de sensores, BPM) y, para vision/wearable,
             # produce un EventoProcesado.
@@ -154,10 +164,12 @@ class Orquestador:
 
             salida = None
             if evento_proc is not None:
+                evento_proc = replace(evento_proc, timestamp=ts_fsm)
                 salida = self.fsm.procesar_evento(evento_proc)
             elif isinstance(ev, (EventoAckWearable, EventoFalloSensor,
                                  EventoRecuperacionSensor)):
                 # Eventos que la FSM consume directamente (el PreFSM devolvio None)
+                ev = replace(ev, timestamp=ts_fsm)
                 salida = self.fsm.procesar_evento(ev)
 
             if salida is None:
