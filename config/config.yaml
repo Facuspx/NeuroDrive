@@ -70,9 +70,15 @@ vision:
 # Análisis de ojos (EAR, parpadeos, microsueños)
 # -----------------------------------------------------------------------------
 ojos:
+  # Relativo unificado: ear_base es la UNICA fuente de verdad del umbral de
+  # ojo cerrado. Lo usan IGUAL la vision (pantalla) y el Core (FSM).
+  # Copiar el ear_base del resultado de calibracion, igual que los neutros.
+  ear_base: 0.31
+  factor_ear_cierre: 0.65      # umbral_cerrar = 0.31 * 0.65 = 0.2015
+  factor_ear_apertura: 0.84    # umbral_abrir  = 0.31 * 0.84 = 0.2604
   # Umbrales con histéresis para evitar parpadeo del estado
-  umbral_ear_cerrar: 0.18      # Por debajo de esto, ojo se considera cerrado
-  umbral_ear_abrir: 0.22       # Por encima de esto, ojo se considera abierto
+  umbral_ear_cerrar: 0.21    # por debajo de esto = cerrando
+  umbral_ear_abrir: 0.26     # por encima de esto = abriendo
 
   # Duración mínima/máxima de un parpadeo normal (segundos)
   dur_min_parpadeo_seg: 0.10

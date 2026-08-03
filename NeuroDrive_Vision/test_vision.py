@@ -554,7 +554,24 @@ def main(argv=None) -> int:
             resultado_calib = ResultadoCalibracion(exito=False, motivo_fallo=str(e))
 
     # Aplicar calibracion a los analizadores
-    Calibrador.aplicar(resultado_calib, analizador_ojos, analizador_boca)
+   # Aplicar calibracion SOLO a la boca (los neutros de cabeza van al
+    # publicador aparte). El ear_base de ojos NO se auto-aplica: la vision
+    # usa el ear_base del config, que es la fuente unica compartida con el
+    # Core (relativo unificado). El ear_base de la calibracion se imprime
+    # arriba para que lo copies al config, igual que los neutros.
+    Calibrador.aplicar(resultado_calib, analizador_ojos=None,
+                       analizador_boca=analizador_boca)
+
+    # Umbrales de ojos desde el config (mismo criterio que la FSM del Core)
+    if getattr(config.ojos, "ear_base", 0.0) > 0.0:
+        analizador_ojos.actualizar_umbrales(
+            ear_base=config.ojos.ear_base,
+            factor_cierre=config.ojos.factor_ear_cierre,
+            factor_apertura=config.ojos.factor_ear_apertura,
+        )
+        print(f"Ojos: umbral cierre={analizador_ojos.umbral_cierre:.3f} "
+              f"apertura={analizador_ojos.umbral_apertura:.3f} "
+              f"(ear_base={config.ojos.ear_base:.3f} del config)")
 
     # Pasar los angulos neutros de la calibracion al publicador, para que
     # normalice pitch/yaw/roll antes de enviarlos al Core (Opcion A).

@@ -151,7 +151,7 @@ class AnalizadorOjos:
     """
 
     # Defaults razonables si no hay calibracion (paper original)
-    EAR_BASE_DEFAULT = 0.30           # EAR tipico con ojos abiertos
+    EAR_BASE_DEFAULT = 0.31           # EAR tipico con ojos abiertos
     FACTOR_CIERRE_DEFAULT = 0.75      # umbral_cierre = base * 0.70
     FACTOR_APERTURA_DEFAULT = 0.85    # umbral_apertura = base * 0.80
 

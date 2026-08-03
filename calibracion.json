@@ -1,14 +1,14 @@
 {
   "exito": true,
-  "timestamp": 1785521686.9982395,
-  "ear_base": 0.27437924791863433,
-  "mar_base": 0.0248374138307395,
-  "pitch_neutro": 4.642360409215897,
-  "yaw_neutro": -37.796132516248534,
-  "roll_neutro": 0.2535772446329807,
-  "muestras_totales": 908,
-  "muestras_validas": 908,
+  "timestamp": 1785721678.2081475,
+  "ear_base": 0.30976255741052683,
+  "mar_base": 0.052820923557123714,
+  "pitch_neutro": -3.7115819913231007,
+  "yaw_neutro": 7.178898553991823,
+  "roll_neutro": -4.111256862206469,
+  "muestras_totales": 906,
+  "muestras_validas": 906,
   "tasa_deteccion": 1.0,
-  "duracion_real_seg": 59.95065241600014,
+  "duracion_real_seg": 59.94453044000056,
   "motivo_fallo": ""
 }

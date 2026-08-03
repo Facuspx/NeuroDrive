@@ -78,11 +78,11 @@ def ev_normal(t: float, **kwargs) -> EventoProcesado:
         bostezo=False,
         cabeceo=False,
         parpadeo=True,
-        parpadeos_por_minuto=8.0,
+        parpadeos_por_minuto=10.0,
         perclos=0.1,
         bostezos_ventana_larga=0,
         bpm_actual=72,
-        nivel_riesgo_bpm=NivelRiesgoBPM.ALERTA,
+        nivel_riesgo_bpm=NivelRiesgoBPM.NORMAL,
         ventana_no_confiable=False,
         vision_disponible=True,
         wearable_disponible=True,
@@ -105,10 +105,8 @@ def ev_cabeceo(t: float, **kwargs) -> EventoProcesado:
 
 
 def ev_señales_leves(t: float, **kwargs) -> EventoProcesado:
-    fsm = crear_fsm()
-    salida = fsm.procesar_evento(ev_microsueno(t=100))
-    assert salida.transicion_ocurrio
-    assert salida.motivo_transicion != ""
+    """Parpadeos bajos: señal leve sin evento confirmado."""
+    return ev_normal(t, parpadeos_por_minuto=8.0, **kwargs)
 
 
 def ev_ack_ok(t: float, id_seq: int) -> EventoAckWearable:
@@ -182,18 +180,17 @@ print("\n--- Tests de transicion S0 -> S1 ---")
 def _():
     fsm = crear_fsm()
     fsm.procesar_evento(ev_normal(t=100))                      # arranque
-    fsm.procesar_evento(ev_normal(t=170, perclos=0.32))        # arma la señal
-    salida = fsm.procesar_evento(ev_normal(t=195, perclos=0.32))  # sostenida 25s
+    fsm.procesar_evento(ev_normal(t=170, parpadeos_por_minuto=8.0))
+    salida = fsm.procesar_evento(ev_normal(t=195, parpadeos_por_minuto=8.0))
     assert salida.estado_actual == EstadoFSM.PRE_ALERTA
-    #assert salida.transicion_ocurrio
 
 
 @_test("S0 -> S1 por BPM en nivel ALERTA")
 def _():
     fsm = crear_fsm()
     fsm.procesar_evento(ev_normal(t=100))                      # arranque
-    fsm.procesar_evento(ev_normal(t=170, perclos=0.32))        # arma la señal
-    salida = fsm.procesar_evento(ev_normal(t=195, perclos=0.32))  # sostenida 25s
+    fsm.procesar_evento(ev_normal(t=170, nivel_riesgo_bpm=NivelRiesgoBPM.ALERTA))
+    salida = fsm.procesar_evento(ev_normal(t=195, nivel_riesgo_bpm=NivelRiesgoBPM.ALERTA))
     assert salida.estado_actual == EstadoFSM.PRE_ALERTA
 
 
@@ -597,8 +594,8 @@ def _():
 
 @_test("Salida con transicion tiene motivo poblado")
 def _():
-    fsm = crear_fsm(EstadoFSM.NORMAL)
-    salida = fsm.procesar_evento(ev_señales_leves(t=100))
+    fsm = crear_fsm()
+    salida = fsm.procesar_evento(ev_microsueno(t=100))
     assert salida.transicion_ocurrio
     assert salida.motivo_transicion != ""
 

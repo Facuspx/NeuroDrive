@@ -66,6 +66,15 @@ class ConfigFSMSeccion:
     max_microsuenos_ventana_corta: int = 1
     max_bostezos_ventana_corta: int = 3
     max_cabeceos_ventana_corta: int = 1
+    # Mejoras de manejo de somnolencia
+    calentamiento_senales_seg: float = 60.0
+    persistencia_senales_leves_seg: float = 20.0
+    perclos_confirmado: float = 0.35
+    perclos_confirmado_sostenido_seg: float = 30.0
+    max_eventos_severos_ventana: int = 3
+    ventana_episodios_seg: float = 900.0
+    umbral_respuesta_lenta_ms: int = 5000
+    
 
     def __post_init__(self) -> None:
         if self.ventana_corta_seg <= 0:
@@ -122,6 +131,12 @@ class ConfigOjosSeccion:
     """Seccion [ojos] del config.yaml."""
     umbral_ear_cerrar: float = 0.18
     umbral_ear_abrir: float = 0.22
+    # Relativo unificado: si ear_base > 0, los umbrales de cierre/apertura se
+    # DERIVAN como ear_base * factor, y los absolutos de arriba se ignoran.
+    # Asi la vision (pantalla) y el Core (FSM) usan un unico criterio.
+    ear_base: float = 0.0
+    factor_ear_cierre: float = 0.68
+    factor_ear_apertura: float = 0.84
     dur_min_parpadeo_seg: float = 0.10
     dur_max_parpadeo_seg: float = 0.40
     dur_min_microsueno_seg: float = 1.5
@@ -132,6 +147,21 @@ class ConfigOjosSeccion:
     alpha_suavizado_ear: float = 0.5
 
     def __post_init__(self) -> None:
+        # Relativo unificado: si hay ear_base calibrado, derivar los umbrales.
+        if self.ear_base > 0.0:
+            if not (0.0 < self.factor_ear_cierre < self.factor_ear_apertura <= 1.0):
+                raise ConfigError(
+                    f"factores EAR invalidos: cierre={self.factor_ear_cierre}, "
+                    f"apertura={self.factor_ear_apertura} "
+                    f"(debe cumplirse 0 < cierre < apertura <= 1)"
+                )
+            if not (0.1 < self.ear_base < 1.0):
+                raise ConfigError(
+                    f"ear_base fuera de rango razonable: {self.ear_base}"
+                )
+            self.umbral_ear_cerrar = self.ear_base * self.factor_ear_cierre
+            self.umbral_ear_abrir = self.ear_base * self.factor_ear_apertura
+
         if self.umbral_ear_cerrar >= self.umbral_ear_abrir:
             raise ConfigError(
                 f"umbral_ear_cerrar ({self.umbral_ear_cerrar}) debe ser menor que "

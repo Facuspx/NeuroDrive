@@ -718,6 +718,13 @@ class FSM:
                     intensidad=30,
                     duracion_ms=1500,
                 ),
+                # Yo edite esta parte se la puede sacar.
+                ComandoActuador(
+                                    tipo=TipoComandoActuador.BUZZER_CORTO,
+                                    intensidad=50,
+                                    duracion_ms=200,
+                                ),
+                #============================================
                 ComandoActuador(
                     tipo=TipoComandoActuador.SECUENCIA_ACK,
                     intensidad=50,
