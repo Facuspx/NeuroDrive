@@ -174,6 +174,10 @@ class ActuadorWearable(ActuadorBase):
         if not self._abierto:
             return
         self.apagar()
+        # Apagado ORDENADO: avisar al ESP que esta desconexion es legitima.
+        # Si el proceso crashea, detener() no corre y este aviso NO se envia,
+        # asi el ESP distingue mantenimiento de manipulacion.
+        self._notificar_apagado_limpio()
         self._abierto = False
         try:
             self._cola.put_nowait(_SENTINELA_FIN)
@@ -190,6 +194,25 @@ class ActuadorWearable(ActuadorBase):
             self._transporte.close()
             self._transporte = None
         self.log.info("ActuadorWearable detenido")
+
+    def _notificar_apagado_limpio(self, reintentos: int = 3) -> None:
+        """Envia el mensaje de apagado ORDENADO al ESP (varias veces, mismo
+        id_paquete: el ESP deduplica). Robustez ante perdida de UDP."""
+        if not self._abierto or self._transporte is None:
+            return
+        with self._lock:
+            self._id_paquete += 1
+            id_paq = self._id_paquete
+        datos = protocolo.serializar_apagado_limpio(id_paq)
+        for _ in range(max(1, reintentos)):
+            try:
+                self._transporte.sendto(datos)
+                self.paquetes_enviados += 1
+            except OSError as e:
+                self.errores_envio += 1
+                self.log.debug("Fallo enviando APAGADO_LIMPIO: %s", e)
+                break
+            time.sleep(self._espaciado_s)
 
     # ------------------------------------------------------------------
     # Hilo emisor

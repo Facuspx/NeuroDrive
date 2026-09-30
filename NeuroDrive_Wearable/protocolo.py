@@ -57,6 +57,12 @@ from common.contratos import (
 
 VERSION_PROTOCOLO = 1
 
+# Tipo Pi->ESP fuera del enum de comandos de la FSM: apagado ORDENADO.
+# No es un ComandoActuador (la FSM nunca lo emite); lo manda el
+# ActuadorWearable en su detener(). El ESP lo usa para distinguir un apagado
+# limpio (mantenimiento) de un crash/desconexion (posible manipulacion).
+TIPO_APAGADO_LIMPIO = 99
+
 # Tipos de comando que la pulsera entiende (el resto no se le envia)
 TIPOS_PARA_WEARABLE = frozenset({
     TipoComandoActuador.VIBRAR_LEVE,
@@ -99,6 +105,20 @@ def serializar_apagar(id_paquete: int) -> bytes:
     }
     return json.dumps(obj, separators=(",", ":")).encode("utf-8")
 
+def serializar_apagado_limpio(id_paquete: int) -> bytes:
+    """Mensaje Pi->ESP de apagado ORDENADO. El ESP, al recibirlo, sabe que la
+    proxima perdida de conexion es legitima y NO dispara la alerta de
+    manipulacion al supervisor. Mismo formato que un comando (tipo=99) para
+    que el parser del ESP lo maneje uniforme."""
+    obj = {
+        "v": VERSION_PROTOCOLO,
+        "tipo": TIPO_APAGADO_LIMPIO,
+        "intensidad": 0,
+        "duracion_ms": 0,
+        "id_secuencia": None,
+        "id_paquete": id_paquete,
+    }
+    return json.dumps(obj, separators=(",", ":")).encode("utf-8")
 
 def parsear_comando(datos: bytes) -> Dict[str, Any]:
     """Lado ESP32/simulador: parsea un comando entrante. Valida lo minimo."""

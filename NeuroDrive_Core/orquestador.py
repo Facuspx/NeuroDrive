@@ -31,6 +31,7 @@ from dataclasses import dataclass, replace
 from typing import Optional
 
 from common.contratos import (
+    EventoWearable,
     EstadoFSM,
     EventoAckWearable,
     EventoFalloSensor,
@@ -66,6 +67,8 @@ class Orquestador:
 
         self.stats = EstadisticasOrquestador()
         self._estado_previo: Optional[EstadoFSM] = None
+        self._ultimo_bpm: Optional[int] = None
+        self._ultima_bateria: Optional[int] = None
         self._iniciado = False
 
     # ------------------------------------------------------------------
@@ -147,6 +150,13 @@ class Orquestador:
     def _procesar_envelope(self, envelope) -> None:
         try:
             ev = envelope.evento
+            # Recordar el ultimo BPM/bateria del wearable para el resumen
+            # (permite ver y validar el pulso en vivo).
+            if isinstance(ev, EventoWearable):
+                if ev.bpm is not None:
+                    self._ultimo_bpm = ev.bpm
+                if ev.bateria_porcentaje is not None:
+                    self._ultima_bateria = ev.bateria_porcentaje
             # RELOJ UNICO PARA LA FSM: usamos el timestamp de RECEPCION del
             # Gestor (tiempo real), no el del origen. Asi la vision (que en
             # modo video trae su propio reloj arrancando en cero) y el wearable
@@ -203,5 +213,7 @@ class Orquestador:
             f"[ORQ] estado={estado} envelopes={self.stats.envelopes} "
             f"aFSM={self.stats.eventos_a_fsm} transiciones={self.stats.transiciones} "
             f"comandos={self.stats.comandos_despachados} "
-            f"errores={self.stats.errores_procesamiento}"
+            f"errores={self.stats.errores_procesamiento} "
+            f"bpm={self._ultimo_bpm if self._ultimo_bpm is not None else '--'} "
+            f"bat={str(self._ultima_bateria)+'%' if self._ultima_bateria is not None else '--'}"
         )

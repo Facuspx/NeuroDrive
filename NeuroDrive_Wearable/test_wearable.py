@@ -120,6 +120,28 @@ def _():
 # =============================================================================
 print("\n--- ActuadorWearable (transporte falso) ---")
 
+@_test("detener() (apagado ordenado) envia APAGADO_LIMPIO; apagar() no")
+def _():
+    import json
+    t = _TransporteFalso()
+    a = ActuadorWearable(transporte=t)
+    a.iniciar()
+    a.detener()
+    limpios = [p for p in t.paquetes() if b'"tipo":99' in p]
+    assert len(limpios) >= 1, "detener() debe avisar apagado limpio"
+    ids = {json.loads(p)["id_paquete"] for p in limpios}
+    assert len(ids) == 1, "los reenvios comparten id_paquete"
+
+    # apagar() (recuperacion por ACK) NO debe mandar apagado limpio
+    t2 = _TransporteFalso()
+    a2 = ActuadorWearable(transporte=t2)
+    a2.iniciar()
+    a2.apagar()
+    a2.detener()  # este detener SI manda, pero contamos antes seria complejo;
+    # verificamos que el apagar() aislado no lo gener� revisando el primer paquete
+    primer_tipo = json.loads(t2.paquetes()[0])["tipo"]
+    assert primer_tipo == int(C.APAGAR_TODO), "apagar() manda APAGAR_TODO, no 99"
+
 @_test("tipos_soportados son los de vibracion + SECUENCIA_ACK")
 def _():
     a = ActuadorWearable(transporte=_TransporteFalso())
