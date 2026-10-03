@@ -4,16 +4,26 @@ NeuroDrive Vision - Analizador de boca
 
 Calcula el Mouth Aspect Ratio (MAR) y detecta bostezos.
 
-Decisiones tomadas (ver chat de planificacion):
+ALCANCE DE LA DETECCION DE BOSTEZOS
+  Lo que este modulo le entrega al sistema es el MAR de cada cuadro, que el
+  publicador transmite al nucleo. La decision de que constituye un bostezo es
+  del nucleo (DetectorBostezos, en NeuroDrive_Core/pre_fsm.py): ese es el
+  unico detector que alimenta a la maquina de estados.
+
+  El detector de bostezos de este archivo existe SOLO para la ventana de
+  depuracion: colorea el contorno de la boca y lleva la cuenta que se muestra
+  en pantalla. Para que esa cuenta coincida con la del nucleo, cuando se le
+  entrega el Config toma de config.boca los mismos parametros: umbral,
+  factor de cierre, duracion minima y ventana.
+
+Decisiones de implementacion:
   - Formula MAR clasica con 3 pares verticales / 1 base horizontal.
-  - 8 puntos de MediaPipe FaceMesh (mismos del codigo de referencia).
+  - 8 puntos de MediaPipe FaceMesh.
   - Histeresis con doble umbral (Schmitt trigger) para evitar oscilaciones.
-  - Umbrales absolutos por default (MAR no depende tanto del individuo
-    como el EAR). Pueden calibrarse via actualizar_umbrales().
-  - Bostezo = MAR alto sostenido por > 2 segundos.
-  - Si dura > 10 seg, se descarta (no es bostezo, es otra cosa).
-  - Ventana de bostezos/min = 5 min (son mucho menos frecuentes que parpadeos).
+  - Umbrales absolutos (el MAR depende menos del individuo que el EAR).
   - Timeout de perdida de rostro = 2 seg (mismo que ojos).
+  - Sin Config (uso aislado, pruebas): umbrales 0,50 / 0,40, bostezo entre
+    2 y 10 s, ventana de 5 min.
 
 NOTA: El evento de bostezo se emite SOLO en el frame donde la boca se cierra
 (al terminar el bostezo), no mientras esta abierta. Esto permite obtener
@@ -127,13 +137,16 @@ class AnalizadorBoca:
     No es thread-safe.
     """
 
-    # Defaults
+    # Valores que rigen cuando NO se entrega Config (uso aislado, pruebas).
+    # Con Config, los parametros salen de config.boca (ver __init__).
     UMBRAL_APERTURA_DEFAULT = 0.50   # MAR sobre el cual consideramos boca abierta
     UMBRAL_CIERRE_DEFAULT = 0.40     # MAR debajo del cual consideramos boca cerrada (histeresis)
 
     # Limites de duracion del bostezo (ms)
     DURACION_MIN_BOSTEZO_MS = 2000    # apertura menor a esto NO es bostezo
     DURACION_MAX_BOSTEZO_MS = 10000   # apertura mayor a esto se descarta (anomalo)
+
+    VENTANA_BOSTEZOS_DEFAULT_S = 300.0   # 5 minutos
 
     # Timeout de perdida de rostro (segundos)
     TIMEOUT_PERDIDA_ROSTRO_S = 2.0
@@ -143,25 +156,51 @@ class AnalizadorBoca:
         config: Optional["Config"] = None,
         umbral_apertura: Optional[float] = None,
         umbral_cierre: Optional[float] = None,
-        ventana_bostezos_seg: float = 300.0,  # 5 minutos
+        ventana_bostezos_seg: Optional[float] = None,
     ) -> None:
         """
         Parametros
         ----------
         config : Config | None
-            Configuracion global (no usada aun, reservada).
+            Configuracion global. Si se entrega, el detector de bostezos usa
+            el MISMO criterio que el nucleo (config.boca):
+                apertura = umbral_mar_bostezo
+                cierre   = umbral_mar_bostezo * factor_mar_cierre
+                duracion minima = dur_min_bostezo_seg, sin maximo
+                ventana  = ventana_bostezos_seg
+            Sin Config rigen los valores por defecto de la clase.
         umbral_apertura : float | None
-            MAR sobre el cual consideramos la boca abierta. Default 0.50.
+            MAR sobre el cual consideramos la boca abierta. Si se indica,
+            tiene prioridad sobre el Config.
         umbral_cierre : float | None
             MAR debajo del cual consideramos boca cerrada (histeresis).
-            Default 0.40. Debe ser < umbral_apertura.
-        ventana_bostezos_seg : float
-            Tamaño de la ventana para bostezos/min. Default 300 (5 min).
+            Debe ser < umbral_apertura. Tiene prioridad sobre el Config.
+        ventana_bostezos_seg : float | None
+            Tamaño de la ventana para bostezos/min. Tiene prioridad sobre el
+            Config.
         """
         self.config = config
 
-        ua = float(umbral_apertura) if umbral_apertura is not None else self.UMBRAL_APERTURA_DEFAULT
-        uc = float(umbral_cierre) if umbral_cierre is not None else self.UMBRAL_CIERRE_DEFAULT
+        # Parametros de partida: del nucleo si hay Config, de la clase si no.
+        boca_cfg = getattr(config, "boca", None)
+        if boca_cfg is not None:
+            ua_base = float(boca_cfg.umbral_mar_bostezo)
+            uc_base = ua_base * float(boca_cfg.factor_mar_cierre)
+            self.duracion_min_bostezo_ms: float = float(boca_cfg.dur_min_bostezo_seg) * 1000.0
+            # El nucleo no descarta aperturas largas: aca tampoco.
+            self.duracion_max_bostezo_ms: Optional[float] = None
+            ventana_base = float(boca_cfg.ventana_bostezos_seg)
+        else:
+            ua_base = self.UMBRAL_APERTURA_DEFAULT
+            uc_base = self.UMBRAL_CIERRE_DEFAULT
+            self.duracion_min_bostezo_ms = float(self.DURACION_MIN_BOSTEZO_MS)
+            self.duracion_max_bostezo_ms = float(self.DURACION_MAX_BOSTEZO_MS)
+            ventana_base = self.VENTANA_BOSTEZOS_DEFAULT_S
+
+        ua = float(umbral_apertura) if umbral_apertura is not None else ua_base
+        uc = float(umbral_cierre) if umbral_cierre is not None else uc_base
+        if ventana_bostezos_seg is None:
+            ventana_bostezos_seg = ventana_base
 
         if not (0.0 < uc < ua < 2.0):
             raise ValueError(
@@ -341,17 +380,20 @@ class AnalizadorBoca:
             if self._ts_inicio_apertura is not None:
                 duracion = (ts_frame - self._ts_inicio_apertura) * 1000.0
                 # Solo cuenta como bostezo si esta en el rango valido
-                if self.DURACION_MIN_BOSTEZO_MS <= duracion <= self.DURACION_MAX_BOSTEZO_MS:
+                d_max = self.duracion_max_bostezo_ms
+                if duracion < self.duracion_min_bostezo_ms:
+                    # Apertura corta (hablar, sonrisa abierta): no es bostezo.
+                    # No es error, simplemente no es evento.
+                    pass
+                elif d_max is None or duracion <= d_max:
                     evento_bostezo = True
                     duracion_evento_ms = duracion
                     self._agregar_bostezo(ts_frame)
-                elif duracion > self.DURACION_MAX_BOSTEZO_MS:
+                else:
                     _log.warning(
-                        "Apertura de boca de %.0fms descartada (> max %dms)",
-                        duracion, self.DURACION_MAX_BOSTEZO_MS,
+                        "Apertura de boca de %.0fms descartada (> max %.0fms)",
+                        duracion, d_max,
                     )
-                # Si dura < 2000ms (hablar, sonrisa abierta), no es bostezo.
-                # No es error, simplemente no es evento.
                 self._ts_inicio_apertura = None
 
         # 5) Duracion de apertura actual
@@ -400,13 +442,20 @@ class AnalizadorBoca:
         frame_bgr: np.ndarray,
         datos_rostro: DatosRostro,
         datos_boca: DatosBoca,
+        duracion_min_bostezo_ms: Optional[float] = None,
     ) -> np.ndarray:
         """
         Dibuja los 8 puntos de la boca y los conecta. Color cambia segun estado:
         - Verde: cerrada
-        - Amarillo: abierta pero no es bostezo aun (< 2s)
-        - Rojo: bostezo en curso (>= 2s)
+        - Amarillo: abierta pero todavia no alcanza la duracion de un bostezo
+        - Rojo: bostezo en curso
+
+        duracion_min_bostezo_ms: pasar analizador.duracion_min_bostezo_ms para
+        que el color cambie con el mismo criterio que usa ese analizador. Sin
+        el argumento se usa el valor por defecto de la clase.
         """
+        if duracion_min_bostezo_ms is None:
+            duracion_min_bostezo_ms = AnalizadorBoca.DURACION_MIN_BOSTEZO_MS
         import cv2
         if not datos_rostro.rostro_presente or datos_rostro.puntos_pixeles is None:
             return frame_bgr.copy()
@@ -416,7 +465,7 @@ class AnalizadorBoca:
         # Determinar color
         if not datos_boca.valido or not datos_boca.boca_abierta:
             color = (0, 255, 0)  # verde: cerrada
-        elif datos_boca.duracion_apertura_actual_ms >= AnalizadorBoca.DURACION_MIN_BOSTEZO_MS:
+        elif datos_boca.duracion_apertura_actual_ms >= duracion_min_bostezo_ms:
             color = (0, 0, 255)  # rojo: bostezo en curso
         else:
             color = (0, 255, 255)  # amarillo: abierta pero corta

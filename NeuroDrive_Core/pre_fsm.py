@@ -18,7 +18,13 @@ Responsabilidades:
   3. Clasificacion del BPM segun umbrales del config
   4. Marcado de ventanas no confiables:
      - frote_ojos_activo
-     - rostro perdido (1-5 frames -> no confiable; >5 -> vision_disponible=False)
+     - rostro perdido (hasta N frames -> no confiable; mas de N ->
+       vision_disponible=False; N = config.vision.max_frames_sin_rostro)
+
+Este modulo es el UNICO lugar donde se define que constituye un parpadeo, un
+microsueno, un bostezo o un cabeceo. La vision calcula y transmite metricas;
+los detectores que tiene para su ventana de depuracion toman de config.yaml
+los mismos parametros que se usan aca.
 
 Arquitectura interna: subdetectores especializados sin estado compartido.
 
@@ -182,6 +188,8 @@ class DetectorBostezos:
 
     def __init__(self, config_boca):
         self.umbral_bostezo = config_boca.umbral_mar_bostezo
+        # Histeresis: la boca se da por cerrada debajo de umbral * factor
+        self.factor_cierre = config_boca.factor_mar_cierre
         self.dur_min_bostezo = config_boca.dur_min_bostezo_seg
         self.ventana_larga_seg = config_boca.ventana_bostezos_seg
 
@@ -194,7 +202,7 @@ class DetectorBostezos:
         if mar is None:
             return False
 
-        umbral_bajar = self.umbral_bostezo * 0.9
+        umbral_bajar = self.umbral_bostezo * self.factor_cierre
 
         if not self.boca_abierta and mar > self.umbral_bostezo:
             self.boca_abierta = True
@@ -235,6 +243,10 @@ class DetectorCabeceos:
 
     def __init__(self, config_cabeza):
         self.umbral_pitch = config_cabeza.umbral_pitch_grados
+        # Histeresis: el cabeceo termina debajo de umbral * factor
+        self.umbral_pitch_fin = (
+            config_cabeza.umbral_pitch_grados * config_cabeza.factor_pitch_fin_cabeceo
+        )
         self.dur_min_cabeceo = config_cabeza.dur_min_cabeceo_seg
         self.umbral_yaw_max = config_cabeza.umbral_yaw_max_grados
 
@@ -262,14 +274,14 @@ class DetectorCabeceos:
             self.ts_inicio_inclinacion = timestamp
             self.cabeceo_en_curso = False
 
-        elif self.inclinado and pitch > self.umbral_pitch * 0.85:
+        elif self.inclinado and pitch > self.umbral_pitch_fin:
             if not self.cabeceo_en_curso:
                 duracion = timestamp - self.ts_inicio_inclinacion
                 if duracion >= self.dur_min_cabeceo:
                     self.cabeceo_en_curso = True
                     return True  # emite al CRUZAR el umbral (cabeza aun abajo)
 
-        elif self.inclinado and pitch <= self.umbral_pitch * 0.85:
+        elif self.inclinado and pitch <= self.umbral_pitch_fin:
             self.inclinado = False
             self.cabeceo_en_curso = False
 
@@ -370,8 +382,11 @@ class ClasificadorBPM:
         self.bpm_actual: Optional[int] = None
 
     def actualizar(self, bpm: Optional[int]) -> None:
-        if bpm is not None:
-            self.bpm_actual = bpm
+        # None es un dato: la pulsera informa que NO tiene una medicion
+        # confiable (sin contacto con la piel, senal inestable). Conservar el
+        # ultimo valor seria inventar una frecuencia, y con ella un nivel de
+        # riesgo, que el sensor ya no respalda.
+        self.bpm_actual = bpm
 
     def clasificar(self) -> NivelRiesgoBPM:
         if self.bpm_actual is None:
@@ -458,9 +473,10 @@ class PreFSM:
         Procesa un Envelope y devuelve un EventoProcesado, o None si el
         envelope no debe generar uno (ACKs, eventos de salud).
 
-        Los ACKs y los EventoFalloSensor/EventoRecuperacionSensor se
-        devuelven via los helpers get_evento_ack() / get_evento_salud()
-        para que el main loop los pase directamente a la FSM.
+        Los ACKs y los EventoFalloSensor/EventoRecuperacionSensor no
+        producen EventoProcesado: el Orquestador se los entrega a la FSM
+        tal como llegan. Aca solo se actualiza la disponibilidad de la
+        fuente afectada.
         """
         self.envelopes_procesados += 1
         evento = envelope.evento
@@ -488,18 +504,6 @@ class PreFSM:
             self.envelopes_ignorados += 1
             return None
 
-    def get_evento_ack(self, envelope: Envelope) -> Optional[EventoAckWearable]:
-        """Helper: extrae el ACK si el envelope lo contiene, para pasarlo a la FSM."""
-        if isinstance(envelope.evento, EventoAckWearable):
-            return envelope.evento
-        return None
-
-    def get_evento_salud(self, envelope: Envelope):
-        """Helper: extrae fallo/recuperacion de sensor, para pasarlos a la FSM."""
-        if isinstance(envelope.evento, (EventoFalloSensor, EventoRecuperacionSensor)):
-            return envelope.evento
-        return None
-
     def estadisticas(self) -> dict:
         return {
             "envelopes_procesados": self.envelopes_procesados,
@@ -510,6 +514,23 @@ class PreFSM:
             "bpm_actual": self.clasificador_bpm.bpm_actual,
             "bostezos_ultimos_15min": len(self.detector_bostezos.bostezos_recientes),
         }
+
+    # ==================================================================
+    # ESTADO ENTRE SESIONES
+    # ==================================================================
+
+    def get_bostezos_recientes(self) -> list:
+        """Marcas de tiempo de los bostezos de la ventana larga (para persistir)."""
+        return list(self.detector_bostezos.bostezos_recientes)
+
+    def restaurar_bostezos(self, marcas) -> None:
+        """
+        Carga los bostezos de la sesion anterior en la ventana larga. Se llama
+        una vez, antes de procesar el primer evento. La purga habitual del
+        detector descarta los que queden fuera de la ventana.
+        """
+        self.detector_bostezos.bostezos_recientes.clear()
+        self.detector_bostezos.bostezos_recientes.extend(sorted(float(t) for t in marcas))
 
     # ==================================================================
     # PROCESAMIENTO INTERNO

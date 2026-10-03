@@ -3,7 +3,7 @@ test_analizador_ojos.py - Tests funcionales de AnalizadorOjos.
 
 Ejecutar:
     cd ~/NeuroDrive
-    python -m NeuroDrive_Vision.test_analizador_ojos
+    python -m NeuroDrive_Vision.tests.test_analizador_ojos
 
 Tests sin hardware (15):
    1. Construccion con parametros default

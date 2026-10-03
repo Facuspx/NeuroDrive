@@ -634,13 +634,6 @@ class DetectorFroteOjos:
         if not datos.valido:
             return out
 
-        # Regiones
-        for region in (datos.region_ojo_izq, datos.region_ojo_der):
-            if region is not None and region[2] > 0 and region[3] > 0:
-                x, y, w, h = region
-                color = (0, 0, 255) if datos.frote_en_curso else (0, 255, 255)
-                #cv2.rectangle(out, (x, y), (x + w, y + h), color, 1)
-
         # Puntas de dedos
         for (px, py) in datos.puntas_detectadas:
             cv2.circle(out, (int(px), int(py)), 5, (0, 255, 0), -1)

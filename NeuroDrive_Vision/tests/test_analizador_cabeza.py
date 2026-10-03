@@ -3,7 +3,7 @@ test_analizador_cabeza.py - Tests funcionales de AnalizadorCabeza.
 
 Ejecutar:
     cd ~/NeuroDrive
-    python -m NeuroDrive_Vision.test_analizador_cabeza
+    python -m NeuroDrive_Vision.tests.test_analizador_cabeza
 
 Valida:
   Tests sin hardware (12):

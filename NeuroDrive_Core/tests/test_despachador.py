@@ -3,7 +3,7 @@ test_despachador.py - Tests funcionales del Despachador de Comandos.
 
 Ejecutar:
     cd ~/NeuroDrive
-    python -m NeuroDrive_Core.test_despachador
+    python -m NeuroDrive_Core.tests.test_despachador
 
 Todo deterministico, sin hardware. Usa ActuadorSimulado para verificar
 ruteo, APAGAR_TODO, aislamiento de errores, reemplazo y shutdown limpio.
@@ -366,6 +366,43 @@ def _():
     d.detener()
     assert d.stats.comandos_encolados == 3
     assert d.stats.comandos_ejecutados == 3
+
+
+@_test("voz y supervisor sin actuador: se cuentan y no generan advertencia")
+def _():
+    import logging
+
+    class _Captura(logging.Handler):
+        def __init__(self):
+            super().__init__(level=logging.DEBUG)
+            self.registros = []
+        def emit(self, record):
+            self.registros.append(record)
+
+    logger = logging.getLogger("NeuroDrive.Despachador.test_sin_destinatario")
+    logger.setLevel(logging.DEBUG)
+    logger.propagate = False
+    captura = _Captura()
+    logger.addHandler(captura)
+
+    buzzer = ActuadorSimulado("buzzer", tipos={C.BUZZER_CORTO})
+    d = DespachadorComandos(logger=logger)
+    d.registrar_actuador(buzzer)
+    d.iniciar()
+    d.despachar(_salida(
+        ComandoActuador(tipo=C.BUZZER_CORTO, intensidad=50, duracion_ms=200),
+        ComandoActuador(tipo=C.REPRODUCIR_VOZ, mensaje_voz="hola"),
+        ComandoActuador(tipo=C.NOTIFICAR_SUPERVISOR),
+        ComandoActuador(tipo=C.SECUENCIA_ACK, id_secuencia=1),   # este SI deberia tener destinatario
+    ))
+    d.esperar_vaciado(timeout=1.0)
+    d.detener()
+    logger.removeHandler(captura)
+
+    assert buzzer.cantidad_recibida() == 1
+    assert d.stats.comandos_sin_destinatario == 3
+    advertencias = [r.getMessage() for r in captura.registros if r.levelno >= logging.WARNING]
+    assert len(advertencias) == 1 and "SECUENCIA_ACK" in advertencias[0], advertencias
 
 
 # =============================================================================

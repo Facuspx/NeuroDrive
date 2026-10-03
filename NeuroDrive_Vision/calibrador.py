@@ -155,6 +155,54 @@ class ResultadoCalibracion:
             return float("inf")
         return (time.time() - self.timestamp) / 86400.0
 
+    # ------------------------------------------------------------------
+    # Relacion con config.yaml
+    # ------------------------------------------------------------------
+    # config.yaml es la UNICA fuente de los valores del conductor, porque la
+    # leen los dos programas (vision y nucleo). Este resultado es solo la
+    # ultima medicion: sus valores se copian al config a mano.
+
+    def bloque_config(self) -> str:
+        """Texto listo para pegar en config.yaml con los valores medidos."""
+        return (
+            "ojos:\n"
+            f"  ear_base: {self.ear_base:.3f}\n"
+            "cabeza:\n"
+            f"  pitch_neutro_grados: {self.pitch_neutro:.1f}\n"
+            f"  yaw_neutro_grados: {self.yaw_neutro:.1f}\n"
+            f"  roll_neutro_grados: {self.roll_neutro:.1f}"
+        )
+
+    def diferencias_con_config(
+        self,
+        config,
+        tolerancia_ear: float = 0.01,
+        tolerancia_grados: float = 2.0,
+    ) -> list:
+        """
+        Compara esta calibracion con lo que dice config.yaml. Devuelve una
+        linea de texto por cada valor que difiere mas que la tolerancia (lista
+        vacia si coinciden). Sirve para avisar que la calibracion vigente
+        todavia no se copio al config.
+        """
+        pares = (
+            ("ojos.ear_base", self.ear_base, config.ojos.ear_base, tolerancia_ear, "{:.3f}"),
+            ("cabeza.pitch_neutro_grados", self.pitch_neutro,
+             config.cabeza.pitch_neutro_grados, tolerancia_grados, "{:+.1f}"),
+            ("cabeza.yaw_neutro_grados", self.yaw_neutro,
+             config.cabeza.yaw_neutro_grados, tolerancia_grados, "{:+.1f}"),
+            ("cabeza.roll_neutro_grados", self.roll_neutro,
+             config.cabeza.roll_neutro_grados, tolerancia_grados, "{:+.1f}"),
+        )
+        diferencias = []
+        for nombre, medido, en_config, tolerancia, fmt in pares:
+            if abs(medido - en_config) > tolerancia:
+                diferencias.append(
+                    f"{nombre}: calibracion {fmt.format(medido)}, "
+                    f"config {fmt.format(en_config)}"
+                )
+        return diferencias
+
 
 class ErrorCalibrador(Exception):
     """Error tecnico en el calibrador."""
@@ -502,13 +550,17 @@ class Calibrador:
     def aplicar(
         resultado: ResultadoCalibracion,
         analizador_ojos: Optional[AnalizadorOjos] = None,
-        analizador_boca: Optional[AnalizadorBoca] = None,
     ) -> bool:
         """
-        Aplica un ResultadoCalibracion a los analizadores correspondientes.
+        Aplica el ear_base de un ResultadoCalibracion a un AnalizadorOjos.
+
+        Es para usar el analizador de manera aislada (pruebas, diagnostico).
+        El sistema integrado NO llama a este metodo: toma ear_base y la
+        postura neutra de config.yaml, que es la fuente unica que comparten
+        la vision y el nucleo (ver bloque_config()).
 
         Solo aplica si resultado.exito es True. Si es False, no toca nada
-        (los analizadores quedan con sus defaults).
+        (el analizador queda con sus defaults).
 
         Returns:
             True si se aplico, False si el resultado no era valido.
@@ -521,10 +573,5 @@ class Calibrador:
             analizador_ojos.actualizar_umbrales(ear_base=resultado.ear_base)
             _log.info("Calibracion aplicada a AnalizadorOjos (ear_base=%.3f)",
                       resultado.ear_base)
-
-        # El AnalizadorBoca usa umbrales absolutos por defecto; la calibracion
-        # del MAR es opcional (ver decision en chat 4.5). Se deja el parametro
-        # para uso futuro.
-        _ = analizador_boca
 
         return True

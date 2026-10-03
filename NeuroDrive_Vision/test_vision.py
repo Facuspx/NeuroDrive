@@ -461,10 +461,15 @@ def main(argv=None) -> int:
         cap = CapturaVideo(config)
         print("\nFuente: camara CSI en vivo")
 
-    detector_rostro = DetectorRostro()
+    detector_rostro = DetectorRostro(
+        min_deteccion=config.vision.confianza_minima_deteccion,
+        min_tracking=config.vision.confianza_minima_seguimiento,
+    )
     analizador_cabeza = AnalizadorCabeza()
     analizador_ojos = AnalizadorOjos()
-    analizador_boca = AnalizadorBoca()
+    # Con el Config, la cuenta de bostezos de la pantalla usa el mismo
+    # criterio que el nucleo (config.boca).
+    analizador_boca = AnalizadorBoca(config)
     detector_frote = DetectorFroteOjos()
     # El publicador corre en modo simulado salvo que se pida --mq-real.
     # Mientras el Core no exista, nadie consume la cola: el modo simulado
@@ -553,16 +558,11 @@ def main(argv=None) -> int:
             print(f"Error durante la calibracion: {e}. Se usaran defaults.")
             resultado_calib = ResultadoCalibracion(exito=False, motivo_fallo=str(e))
 
-    # Aplicar calibracion a los analizadores
-   # Aplicar calibracion SOLO a la boca (los neutros de cabeza van al
-    # publicador aparte). El ear_base de ojos NO se auto-aplica: la vision
-    # usa el ear_base del config, que es la fuente unica compartida con el
-    # Core (relativo unificado). El ear_base de la calibracion se imprime
-    # arriba para que lo copies al config, igual que los neutros.
-    Calibrador.aplicar(resultado_calib, analizador_ojos=None,
-                       analizador_boca=analizador_boca)
+    # Valores del conductor: salen de config.yaml, que es la fuente UNICA
+    # compartida con el Core. calibracion.json es solo el resultado de la
+    # ultima medicion; sus valores se copian al config a mano.
 
-    # Umbrales de ojos desde el config (mismo criterio que la FSM del Core)
+    # Umbrales de ojos (mismo criterio que la FSM del Core)
     if getattr(config.ojos, "ear_base", 0.0) > 0.0:
         analizador_ojos.actualizar_umbrales(
             ear_base=config.ojos.ear_base,
@@ -573,23 +573,31 @@ def main(argv=None) -> int:
               f"apertura={analizador_ojos.umbral_apertura:.3f} "
               f"(ear_base={config.ojos.ear_base:.3f} del config)")
 
-    # Pasar los angulos neutros de la calibracion al publicador, para que
-    # normalice pitch/yaw/roll antes de enviarlos al Core (Opcion A).
-    # Si la calibracion fallo, quedan en 0.0 (sin normalizacion).
-    if resultado_calib.exito:
-        pitch_n = resultado_calib.pitch_neutro
-        yaw_n = resultado_calib.yaw_neutro
-        roll_n = resultado_calib.roll_neutro
-    else:
-        pitch_n = yaw_n = roll_n = 0.0
+    # Postura neutra: el publicador resta estos angulos antes de transmitir,
+    # de modo que el Core razona sobre desviaciones respecto de la postura
+    # habitual del conductor y no sobre angulos absolutos.
+    pitch_n = config.cabeza.pitch_neutro_grados
+    yaw_n = config.cabeza.yaw_neutro_grados
+    roll_n = config.cabeza.roll_neutro_grados
     publicador.setear_neutros_cabeza(pitch_n, yaw_n, roll_n)
     print(f"Publicador MQ: neutros = pitch:{pitch_n:+.1f}  "
-          f"yaw:{yaw_n:+.1f}  roll:{roll_n:+.1f} grados")
+          f"yaw:{yaw_n:+.1f}  roll:{roll_n:+.1f} grados (del config)")
     print("  (angulos se envian normalizados al Core)")
 
+    # Aviso si la calibracion guardada todavia no se copio al config
+    if resultado_calib.exito:
+        diferencias = resultado_calib.diferencias_con_config(config)
+        if diferencias:
+            print("\nAVISO: calibracion.json no coincide con config.yaml:")
+            for linea in diferencias:
+                print(f"    {linea}")
+            print("  Se usan los valores del config. Si la calibracion es la vigente,")
+            print("  copia este bloque a config/config.yaml y reinicia vision y Core:")
+            for linea in resultado_calib.bloque_config().split("\n"):
+                print(f"    {linea}")
+
     # Detector de cabeceo SOLO VISUAL (no es deteccion oficial, eso es del
-    # Core). Usa el pitch_neutro de la calibracion como referencia: si la
-    # calibracion fallo, pitch_neutro queda en 0.0 y el umbral es absoluto.
+    # Core). Usa el mismo pitch neutro que el publicador.
     detector_cabeceo = DetectorCabeceoVisual(pitch_neutro=pitch_n)
 
     # -------------------------------------------------------------
@@ -695,7 +703,10 @@ def main(argv=None) -> int:
                     viz = AnalizadorOjos.dibujar_ojos(viz, datos_rostro, datos_ojos)
                 # Contorno de boca
                 if datos_boca is not None:
-                    viz = AnalizadorBoca.dibujar_boca(viz, datos_rostro, datos_boca)
+                    viz = AnalizadorBoca.dibujar_boca(
+                        viz, datos_rostro, datos_boca,
+                        duracion_min_bostezo_ms=analizador_boca.duracion_min_bostezo_ms,
+                    )
 
             # Overlay de frote (regiones + puntas)
             if datos_frote is not None:

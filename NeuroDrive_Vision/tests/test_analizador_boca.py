@@ -3,7 +3,7 @@ test_analizador_boca.py - Tests funcionales de AnalizadorBoca.
 
 Ejecutar:
     cd ~/NeuroDrive
-    python -m NeuroDrive_Vision.test_analizador_boca
+    python -m NeuroDrive_Vision.tests.test_analizador_boca
 
 Tests sin hardware (15):
    1. Construccion con parametros default
@@ -448,6 +448,67 @@ else:
         print(f"    Bostezos detectados: {bostezos}")
         assert frames_totales > 30
         assert tasa > 70.0, f"tasa baja: {tasa:.1f}%"
+
+
+# =============================================================================
+# Con Config: mismo criterio que el nucleo (C11)
+# =============================================================================
+
+print("\n--- Criterio unificado con el nucleo ---")
+
+
+@_test("Sin Config conserva sus valores por defecto")
+def _():
+    a = AnalizadorBoca()
+    assert (a.umbral_apertura, a.umbral_cierre) == (0.50, 0.40)
+    assert a.duracion_min_bostezo_ms == 2000 and a.duracion_max_bostezo_ms == 10000
+    assert a.ventana_bostezos_seg == 300.0
+
+
+@_test("Con Config toma umbral, factor, duracion y ventana de config.boca")
+def _():
+    from NeuroDrive_Core.config_loader import Config, ConfigBocaSeccion
+    cfg = Config()
+    cfg.boca = ConfigBocaSeccion(umbral_mar_bostezo=0.6, factor_mar_cierre=0.9,
+                                 dur_min_bostezo_seg=1.0, ventana_bostezos_seg=900.0)
+    a = AnalizadorBoca(cfg)
+    assert a.umbral_apertura == 0.6
+    assert abs(a.umbral_cierre - 0.54) < 1e-9
+    assert a.duracion_min_bostezo_ms == 1000.0
+    assert a.duracion_max_bostezo_ms is None, "el nucleo no descarta aperturas largas"
+    assert a.ventana_bostezos_seg == 900.0
+    # Un argumento explicito sigue teniendo prioridad sobre el Config
+    b = AnalizadorBoca(cfg, umbral_apertura=0.7, umbral_cierre=0.5)
+    assert (b.umbral_apertura, b.umbral_cierre) == (0.7, 0.5)
+
+
+@_test("Con Config, la vision y el nucleo cuentan los mismos bostezos")
+def _():
+    from NeuroDrive_Core.config_loader import Config
+    from NeuroDrive_Core.pre_fsm import DetectorBostezos
+    cfg = Config()                      # boca: 0,6 / 0,9 / 1,0 s
+    vision = AnalizadorBoca(cfg)
+    nucleo = DetectorBostezos(cfg.boca)
+
+    # (MAR, duracion en s). Entre tramo y tramo la boca se cierra 1 s.
+    tramos = (
+        (0.70, 1.5),     # bostezo
+        (0.70, 0.5),     # apertura corta: hablar
+        (0.55, 3.0),     # no llega al umbral de 0,6
+        (0.70, 12.0),    # bostezo largo: el nucleo lo cuenta, la vision tambien
+        (0.65, 1.2),     # bostezo
+    )
+    n_vision = n_nucleo = 0
+    ts = 1000.0
+    paso = 1.0 / 15.0
+    for mar, duracion in tramos:
+        for valor, segundos in ((mar, duracion), (0.10, 1.0)):
+            for _ in range(int(round(segundos / paso))):
+                ts += paso
+                n_vision += vision.procesar(_crear_rostro_con_mar(valor, ts)).evento_bostezo
+                n_nucleo += nucleo.procesar(valor, ts)
+    assert n_nucleo == 3, f"el nucleo deberia contar 3, conto {n_nucleo}"
+    assert n_vision == n_nucleo, f"vision={n_vision}, nucleo={n_nucleo}"
 
 
 # =============================================================================

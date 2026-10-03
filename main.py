@@ -35,6 +35,15 @@ Opciones:
     --sin-wearable        No levantar actuador ni receptor del wearable
     --wearable-ip IP      Sobrescribe config.red.ip_wearable (ej: 127.0.0.1
                           para probar contra el simulador local)
+    --sesion-nueva        No retomar la sesion anterior: iniciar en NORMAL
+                          aunque haya un estado guardado reciente. Util para
+                          que los ensayos partan siempre del mismo punto.
+
+Estado entre sesiones:
+    El nucleo guarda su estado en config.sesion.archivo_estado. Si se lo
+    relanza dentro de config.sesion.ttl_sesion_seg y la sesion anterior dejo
+    indicios de somnolencia, arranca en PRE_ALERTA y conserva los episodios
+    severos y los bostezos recientes. Ver NeuroDrive_Core/persistencia_sesion.py.
 """
 
 from __future__ import annotations
@@ -42,6 +51,8 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+import time
+from pathlib import Path
 
 try:
     sys.stdout.reconfigure(encoding="utf-8")
@@ -54,35 +65,20 @@ from NeuroDrive_Core.pre_fsm import PreFSM
 from NeuroDrive_Core.fsm import FSM, ConfigFSM
 from NeuroDrive_Core.despachador import DespachadorComandos, ActuadorSimulado
 from NeuroDrive_Core.orquestador import Orquestador
+from NeuroDrive_Core.persistencia_sesion import PersistenciaSesion, resolver_arranque
 from NeuroDrive_Core.actuadores.buzzer import ActuadorBuzzer
 from NeuroDrive_Wearable.actuador_wearable import ActuadorWearable
 from NeuroDrive_Wearable.receptor_wearable import ReceptorWearable
 
 
-def _construir_config_fsm(config) -> ConfigFSM:
-    """
-    Arma la ConfigFSM a partir del Config estructurado (los timeouts de ACK
-    viven en [wearable], los umbrales de escalada en [fsm]). getattr con
-    default protege contra claves que pudieran faltar en config.yaml.
-    """
-    fsm = config.fsm
-    wea = config.wearable
-    return ConfigFSM(
-        tiempo_para_bajar_estado_seg=getattr(fsm, "tiempo_para_bajar_estado_seg", 60.0),
-        timeout_ack_leve_seg=getattr(wea, "timeout_ack_leve_seg", 30.0),
-        timeout_ack_medio_seg=getattr(wea, "timeout_ack_medio_seg", 20.0),
-        timeout_ack_critico_seg=getattr(wea, "timeout_ack_critico_seg", 15.0),
-        max_microsuenos_ventana_corta=getattr(fsm, "max_microsuenos_ventana_corta", 1),
-        max_bostezos_ventana_corta=getattr(fsm, "max_bostezos_ventana_corta", 3),
-        max_cabeceos_ventana_corta=getattr(fsm, "max_cabeceos_ventana_corta", 1),
-        calentamiento_senales_seg=getattr(fsm, "calentamiento_senales_seg", 60.0),
-        persistencia_senales_leves_seg=getattr(fsm, "persistencia_senales_leves_seg", 20.0),
-        perclos_confirmado=getattr(fsm, "perclos_confirmado", 0.35),
-        perclos_confirmado_sostenido_seg=getattr(fsm, "perclos_confirmado_sostenido_seg", 30.0),
-        max_eventos_severos_ventana=getattr(fsm, "max_eventos_severos_ventana", 3),
-        ventana_episodios_seg=getattr(fsm, "ventana_episodios_seg", 900.0),
-        umbral_respuesta_lenta_ms=getattr(fsm, "umbral_respuesta_lenta_ms", 5000),
-    )
+# Raiz del proyecto: las rutas relativas del config se resuelven contra ella,
+# no contra el directorio desde el que se lance el programa.
+RAIZ_PROYECTO = Path(__file__).resolve().parent
+
+
+def _ruta_estado_sesion(config) -> Path:
+    ruta = Path(config.sesion.archivo_estado)
+    return ruta if ruta.is_absolute() else RAIZ_PROYECTO / ruta
 
 
 def _configurar_logging(config) -> None:
@@ -102,6 +98,8 @@ def main(argv=None) -> int:
     parser.add_argument("--buzzer-simulado", action="store_true")
     parser.add_argument("--sin-wearable", action="store_true")
     parser.add_argument("--wearable-ip", type=str, default=None)
+    parser.add_argument("--sesion-nueva", action="store_true",
+                        help="No retomar la sesion anterior; iniciar en NORMAL")
     args = parser.parse_args(argv)
 
     print("=" * 64)
@@ -123,12 +121,32 @@ def main(argv=None) -> int:
     print(f"  Buzzer GPIO:    {config.actuadores.buzzer_gpio_pin}")
     print(f"  Wearable:       {ip_wearable}:{config.red.puerto_udp_envio} (envio) "
           f"/ :{config.red.puerto_udp_escucha} (escucha)")
+
+    # ---- Sesion anterior ----
+    config_fsm = ConfigFSM.desde_config(config)
+    persistencia = PersistenciaSesion(
+        _ruta_estado_sesion(config), ttl_seg=config.sesion.ttl_sesion_seg
+    )
+    if args.sesion_nueva:
+        persistencia.borrar()
+    arranque = resolver_arranque(
+        persistencia.cargar(),
+        ahora=time.time(),
+        ventana_episodios_seg=config_fsm.ventana_episodios_seg,
+        ventana_bostezos_seg=config.boca.ventana_bostezos_seg,
+    )
+    print(f"  Sesion:         {arranque.descripcion}")
     print()
 
     # ---- Componentes del Core ----
     gestor = GestorEventos(config)
     pre_fsm = PreFSM(config)
-    fsm = FSM(_construir_config_fsm(config))
+    pre_fsm.restaurar_bostezos(arranque.bostezos)
+    fsm = FSM(
+        config_fsm,
+        estado_inicial=arranque.estado_inicial,
+        episodios_previos=arranque.episodios_severos,
+    )
 
     # ---- Despachador + actuadores ----
     despachador = DespachadorComandos(capacidad_cola=64)
@@ -157,7 +175,8 @@ def main(argv=None) -> int:
             id_dispositivo=config.identificadores.id_wearable,
         )
 
-    orq = Orquestador(gestor, pre_fsm, fsm, despachador, receptor)
+    orq = Orquestador(gestor, pre_fsm, fsm, despachador, receptor,
+                      persistencia=persistencia)
 
     # ---- Correr ----
     try:

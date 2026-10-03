@@ -3,7 +3,7 @@ test_config_loader.py - Tests funcionales del cargador de configuracion.
 
 Ejecutar:
     cd ~/NeuroDrive
-    python -m NeuroDrive_Core.test_config_loader
+    python -m NeuroDrive_Core.tests.test_config_loader
 
 Valida:
   1. Carga normal desde config/config.yaml
@@ -103,7 +103,7 @@ def _():
     limpiar_cache()
     config = cargar_config()
     assert config.fsm.tiempo_para_bajar_estado_seg == 60.0
-    assert config.fsm.ventana_corta_seg == 60.0
+    assert config.fsm.ventana_episodios_seg == 900.0
 
 
 @_test("Acceso por dot notation a wearable con timeouts nuevos")
@@ -135,7 +135,7 @@ def _():
     limpiar_cache()
     config = cargar_config()
     assert config.identificadores.id_camara == "cam-01"
-    assert config.identificadores.prefijo_sesion == "ses"
+    assert config.identificadores.prefijo_mensaje_interno == "int"
 
 
 @_test("Acceso por dot notation a actuadores")
@@ -143,7 +143,6 @@ def _():
     limpiar_cache()
     config = cargar_config()
     assert config.actuadores.buzzer_gpio_pin == 18
-    assert config.actuadores.habilitar_voz is True
 
 
 # =============================================================================
@@ -185,20 +184,23 @@ def _():
 print("\n--- Tests de validaciones ---")
 
 
-@_test("ConfigFSMSeccion rechaza ventana_corta_seg <= 0")
+@_test("ConfigFSMSeccion rechaza tiempo_para_bajar_estado_seg <= 0")
 def _():
     _debe_fallar(
-        lambda: ConfigFSMSeccion(ventana_corta_seg=0),
-        "ventana_corta_seg=0 deberia fallar",
+        lambda: ConfigFSMSeccion(tiempo_para_bajar_estado_seg=0),
+        "tiempo_para_bajar_estado_seg=0 deberia fallar",
     )
 
 
-@_test("ConfigFSMSeccion rechaza ventana_larga menor que ventana_corta")
+@_test("Factores de histeresis fuera de (0, 1) se rechazan")
 def _():
-    _debe_fallar(
-        lambda: ConfigFSMSeccion(ventana_corta_seg=100, ventana_larga_seg=50),
-        "ventana_larga menor a ventana_corta deberia fallar",
-    )
+    from NeuroDrive_Core.config_loader import ConfigBocaSeccion, ConfigCabezaSeccion
+    _debe_fallar(lambda: ConfigBocaSeccion(factor_mar_cierre=1.0),
+                 "factor_mar_cierre=1 deberia fallar (sin histeresis)")
+    _debe_fallar(lambda: ConfigBocaSeccion(factor_mar_cierre=0.0),
+                 "factor_mar_cierre=0 deberia fallar")
+    _debe_fallar(lambda: ConfigCabezaSeccion(factor_pitch_fin_cabeceo=1.2),
+                 "factor_pitch_fin_cabeceo=1.2 deberia fallar")
 
 
 @_test("ConfigOjosSeccion rechaza histeresis invalida (cerrar >= abrir)")
@@ -322,14 +324,14 @@ ojos:
 def _():
     contenido = """
 fsm:
-  ventana_corta_seg: -10
+  tiempo_para_bajar_estado_seg: -10
 """
     yaml_path = _yaml_temporal(contenido)
     try:
         limpiar_cache()
         _debe_fallar(
             lambda: cargar_config(path=str(yaml_path)),
-            "ventana_corta_seg negativo deberia fallar",
+            "tiempo_para_bajar_estado_seg negativo deberia fallar",
         )
     finally:
         yaml_path.unlink()
@@ -382,25 +384,192 @@ def _():
 print("\n--- Tests de integracion con FSM ---")
 
 
-@_test("Config se puede pasar a ConfigFSM via desde_dict")
+@_test("El config.yaml real se convierte en ConfigFSM via desde_config")
 def _():
-    """Verifica que el flujo: cargar_config() -> dataclass -> ConfigFSM funcione."""
-    from dataclasses import asdict
+    """Verifica el flujo completo: cargar_config() -> Config -> ConfigFSM."""
     from NeuroDrive_Core.fsm import ConfigFSM
 
     limpiar_cache()
     config = cargar_config()
+    cfg_fsm = ConfigFSM.desde_config(config)
 
-    # Construimos el dict que ConfigFSM.desde_dict espera
-    dict_para_fsm = {
-        "fsm": asdict(config.fsm),
-        "wearable": asdict(config.wearable),
-    }
+    assert cfg_fsm.tiempo_para_bajar_estado_seg == config.fsm.tiempo_para_bajar_estado_seg
+    assert cfg_fsm.timeout_ack_leve_seg == config.wearable.timeout_ack_leve_seg
+    assert cfg_fsm.margen_presentacion_desafio_seg == config.wearable.margen_presentacion_desafio_seg
+    # Los tres umbrales de PERCLOS llegan a la FSM desde el yaml
+    assert cfg_fsm.perclos_corroborar_cabeceo == config.fsm.perclos_corroborar_cabeceo
+    assert cfg_fsm.perclos_senales_leves == config.fsm.perclos_senales_leves
+    assert cfg_fsm.perclos_parpados_pesados == config.fsm.perclos_parpados_pesados
+    # Parametros que la FSM toma de otras secciones
+    assert cfg_fsm.max_bostezos_ventana_larga == config.boca.max_bostezos_ventana_larga
+    assert cfg_fsm.parpadeos_por_minuto_alerta == config.ojos.parpadeos_por_minuto_alerta
 
-    cfg_fsm = ConfigFSM.desde_dict(dict_para_fsm)
-    assert cfg_fsm.tiempo_para_bajar_estado_seg == 60.0
-    assert isinstance(cfg_fsm.timeout_ack_leve_seg, (int, float))
-    assert cfg_fsm.timeout_ack_leve_seg > 0
+
+@_test("El config.yaml real define los tres PERCLOS, los neutros y los dos plazos de silencio")
+def _():
+    import yaml
+    limpiar_cache()
+    config = cargar_config()
+    with open(config.ruta_origen, "r", encoding="utf-8") as f:
+        crudo = yaml.safe_load(f)
+    # Que esten ESCRITOS en el yaml, no tomados del valor por defecto
+    for clave in ("perclos_corroborar_cabeceo", "perclos_senales_leves",
+                  "perclos_parpados_pesados"):
+        assert clave in crudo["fsm"], f"falta fsm.{clave} en config.yaml"
+    for clave in ("pitch_neutro_grados", "yaw_neutro_grados", "roll_neutro_grados"):
+        assert clave in crudo["cabeza"], f"falta cabeza.{clave} en config.yaml"
+    assert "timeout_silencio_seg" in crudo["vision"]
+    assert "timeout_heartbeat_seg" in crudo["wearable"]
+    # Y que no queden claves que el cargador ya no conoce
+    for clave in ("perclos_confirmado", "max_microsuenos_ventana_corta",
+                  "max_bostezos_ventana_corta", "max_cabeceos_ventana_corta"):
+        assert clave not in crudo["fsm"], f"clave obsoleta en config.yaml: fsm.{clave}"
+
+
+@_test("Umbral de PERCLOS fuera de (0, 1) se rechaza al cargar")
+def _():
+    _debe_fallar(lambda: ConfigFSMSeccion(perclos_senales_leves=0.0),
+                 "PERCLOS 0 deberia fallar")
+    _debe_fallar(lambda: ConfigFSMSeccion(perclos_parpados_pesados=1.5),
+                 "PERCLOS 1.5 deberia fallar")
+    _debe_fallar(lambda: ConfigFSMSeccion(perclos_corroborar_cabeceo=-0.1),
+                 "PERCLOS negativo deberia fallar")
+
+
+@_test("Postura neutra inverosimil y plazo de silencio nulo se rechazan")
+def _():
+    from NeuroDrive_Core.config_loader import ConfigCabezaSeccion, ConfigVisionSeccion
+    _debe_fallar(lambda: ConfigCabezaSeccion(pitch_neutro_grados=75.0),
+                 "neutro de 75 grados deberia fallar")
+    _debe_fallar(lambda: ConfigVisionSeccion(timeout_silencio_seg=0),
+                 "plazo de silencio 0 deberia fallar")
+    assert ConfigCabezaSeccion(yaw_neutro_grados=-9.5).yaw_neutro_grados == -9.5
+
+
+# =============================================================================
+# TESTS: el yaml y el cargador hablan de las mismas claves (C10)
+# =============================================================================
+
+print("\n--- Tests de correspondencia yaml / cargador ---")
+
+
+class _CapturaAdvertencias:
+    """Junta los mensajes WARNING del cargador mientras dura el bloque with."""
+    def __enter__(self):
+        import logging
+
+        class _H(logging.Handler):
+            def __init__(self):
+                super().__init__(level=logging.WARNING)
+                self.mensajes = []
+            def emit(self, record):
+                self.mensajes.append(record.getMessage())
+
+        self._logger = logging.getLogger("NeuroDrive.ConfigLoader")
+        self._h = _H()
+        self._logger.addHandler(self._h)
+        return self._h.mensajes
+
+    def __exit__(self, *exc):
+        self._logger.removeHandler(self._h)
+        return False
+
+
+@_test("El config.yaml real carga sin ninguna advertencia")
+def _():
+    limpiar_cache()
+    with _CapturaAdvertencias() as avisos:
+        cargar_config(recargar=True)
+    assert avisos == [], f"advertencias al cargar: {avisos}"
+
+
+@_test("Cada campo del cargador figura en el config.yaml real, y viceversa")
+def _():
+    import yaml
+    from dataclasses import fields
+    limpiar_cache()
+    config = cargar_config()
+    with open(config.ruta_origen, "r", encoding="utf-8") as f:
+        crudo = yaml.safe_load(f)
+
+    # Campos que se derivan y por eso NO se escriben en el yaml
+    derivados = {("ojos", "umbral_ear_cerrar"), ("ojos", "umbral_ear_abrir")}
+
+    faltan, sobran = [], []
+    for seccion in fields(config):
+        if seccion.name == "ruta_origen":
+            continue
+        en_codigo = {c.name for c in fields(getattr(config, seccion.name))}
+        en_yaml = set((crudo.get(seccion.name) or {}).keys())
+        for clave in sorted(en_codigo - en_yaml):
+            if (seccion.name, clave) not in derivados:
+                faltan.append(f"{seccion.name}.{clave}")
+        for clave in sorted(en_yaml - en_codigo):
+            sobran.append(f"{seccion.name}.{clave}")
+    assert not faltan, f"campos del cargador que no estan en config.yaml: {faltan}"
+    assert not sobran, f"claves de config.yaml que el cargador no conoce: {sobran}"
+
+
+@_test("Las claves eliminadas ya no existen en el cargador")
+def _():
+    limpiar_cache()
+    config = cargar_config()
+    eliminadas = (
+        ("fsm", "ventana_corta_seg"), ("fsm", "ventana_larga_seg"),
+        ("vision", "indice_camara"), ("vision", "refinar_contornos"),
+        ("ojos", "dur_min_parpadeo_seg"), ("ojos", "parpadeos_por_minuto_normal"),
+        ("ojos", "tiempo_parpadeos_bajos_seg"), ("ojos", "alpha_suavizado_ear"),
+        ("cabeza", "tiempo_calibracion_baseline_seg"), ("red", "ip_raspberry"),
+        ("identificadores", "prefijo_sesion"),
+        ("identificadores", "prefijo_mensaje_vision"),
+        ("identificadores", "prefijo_mensaje_wearable"),
+        ("actuadores", "habilitar_voz"), ("actuadores", "ruta_audios_predefinidos"),
+        ("logging", "ruta_logs"), ("logging", "tamano_max_log_bytes"),
+        ("logging", "archivos_rotados"), ("logging", "habilitar_csv_sesion"),
+        ("logging", "ruta_csv_sesion"),
+    )
+    for seccion, clave in eliminadas:
+        assert not hasattr(getattr(config, seccion), clave), f"sigue existiendo {seccion}.{clave}"
+
+
+@_test("Con ear_base los umbrales de EAR se derivan; escribirlos en el yaml se advierte")
+def _():
+    contenido = """
+ojos:
+  ear_base: 0.30
+  factor_ear_cierre: 0.65
+  factor_ear_apertura: 0.84
+  umbral_ear_cerrar: 0.10
+  umbral_ear_abrir: 0.50
+"""
+    yaml_path = _yaml_temporal(contenido)
+    try:
+        limpiar_cache()
+        with _CapturaAdvertencias() as avisos:
+            config = cargar_config(path=str(yaml_path))
+        assert abs(config.ojos.umbral_ear_cerrar - 0.195) < 1e-9, "debe valer ear_base * factor"
+        assert abs(config.ojos.umbral_ear_abrir - 0.252) < 1e-9
+        assert any("umbral_ear_cerrar" in a and "Se ignoran" in a for a in avisos), avisos
+    finally:
+        yaml_path.unlink()
+
+
+@_test("Sin ear_base se advierte que rigen umbrales absolutos")
+def _():
+    contenido = """
+ojos:
+  dur_min_microsueno_seg: 1.5
+"""
+    yaml_path = _yaml_temporal(contenido)
+    try:
+        limpiar_cache()
+        with _CapturaAdvertencias() as avisos:
+            config = cargar_config(path=str(yaml_path))
+        assert config.ojos.ear_base == 0.0
+        assert any("ear_base no esta definido" in a for a in avisos), avisos
+    finally:
+        yaml_path.unlink()
+        limpiar_cache()
 
 
 # =============================================================================

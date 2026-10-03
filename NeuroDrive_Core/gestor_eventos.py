@@ -60,7 +60,7 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Dict, Optional, Set
+from typing import Dict, Optional
 
 from common.contratos import (
     Envelope,
@@ -535,15 +535,20 @@ class GestorEventos:
         """
         Bucle del monitor de heartbeats.
 
-        Cada N segundos, verifica si algun sensor lleva mas de
-        timeout_heartbeat_seg sin enviar mensaje. Si es asi y no estaba
-        marcado como caido, emite EventoFalloSensor.
+        Cada N segundos, verifica si alguna fuente lleva mas tiempo en
+        silencio que su plazo. Si es asi y no estaba marcada como caida,
+        emite EventoFalloSensor.
 
-        Si un sensor caido vuelve a enviar (verificado por el hilo lector
+        Si una fuente caida vuelve a enviar (verificado por el hilo lector
         que actualiza ultimo_mensaje_ts), emite EventoRecuperacionSensor.
         """
         _log.info("Hilo monitor de salud iniciado")
-        timeout = self.config.wearable.timeout_heartbeat_seg
+        # Cada fuente tiene su plazo: emiten a ritmos por completo distintos
+        # (la vision ~15 mensajes por segundo, la pulsera uno cada 2 s).
+        plazos = {
+            OrigenEvento.VISION: self.config.vision.timeout_silencio_seg,
+            OrigenEvento.WEARABLE: self.config.wearable.timeout_heartbeat_seg,
+        }
 
         while not self._parar.is_set():
             # Dormir con check de parada para terminar rapido
@@ -555,6 +560,7 @@ class GestorEventos:
 
             with self._lock_salud:
                 for origen, salud in self._salud.items():
+                    timeout = plazos[origen]
                     silencio = ahora - salud.ultimo_mensaje_ts
 
                     # Sensor que estaba activo y dejo de responder

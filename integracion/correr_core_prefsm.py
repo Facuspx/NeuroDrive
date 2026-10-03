@@ -55,7 +55,7 @@ except Exception:
 from NeuroDrive_Core.config_loader import cargar_config
 from NeuroDrive_Core.gestor_eventos import GestorEventos
 from NeuroDrive_Core.pre_fsm import PreFSM
-from common.contratos import EventoProcesado, NivelRiesgoBPM
+from common.contratos import EventoProcesado
 
 
 # =============================================================================

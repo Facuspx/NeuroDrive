@@ -254,20 +254,6 @@ class CapturaVideo:
         self._buffer = chunk
         return True
 
-        # Leer un frame de prueba
-        self._buffer = b""
-        frame_prueba = self._leer_siguiente_jpeg()
-        if frame_prueba is None:
-            try:
-                self._proceso.terminate()
-                self._proceso.wait(timeout=2.0)
-            except Exception:
-                pass
-            self._proceso = None
-            return False
-
-        return True
-
     def iniciar(self) -> None:
         """
         Lanza el subproceso rpicam-vid en modo MJPEG y prepara la captura.

@@ -3,7 +3,7 @@ test_detector_rostro.py - Tests funcionales de DetectorRostro.
 
 Ejecutar:
     cd ~/NeuroDrive
-    python -m NeuroDrive_Vision.test_detector_rostro
+    python -m NeuroDrive_Vision.tests.test_detector_rostro
 
 REQUIERE: Pi Camera CSI conectada y MediaPipe instalado.
 

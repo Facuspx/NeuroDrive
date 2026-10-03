@@ -3,7 +3,7 @@ test_detector_frote_ojos.py - Tests funcionales de DetectorFroteOjos.
 
 Ejecutar:
     cd ~/NeuroDrive
-    python -m NeuroDrive_Vision.test_detector_frote_ojos
+    python -m NeuroDrive_Vision.tests.test_detector_frote_ojos
 
 Tests sin hardware (13) - usan inyeccion directa de estado:
    1. Construccion con parametros default

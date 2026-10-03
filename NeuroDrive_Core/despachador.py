@@ -199,6 +199,7 @@ class EstadisticasDespachador:
     comandos_ejecutados: int = 0
     apagados_totales: int = 0
     cola_llena_descartes: int = 0
+    comandos_sin_destinatario: int = 0
     errores_por_actuador: Dict[str, int] = field(default_factory=dict)
 
     def sumar_error(self, nombre_actuador: str) -> None:
@@ -214,6 +215,22 @@ class EstadisticasDespachador:
 
 # Sentinela para pedirle al hilo trabajador que termine.
 _SENTINELA_FIN = object()
+
+# Ordenes que la FSM emite y que el prototipo actual no ejecuta, porque sus
+# actuadores quedaron fuera del alcance de esta etapa:
+#   REPRODUCIR_VOZ        asistente de voz (informe, apartado 4.4)
+#   NOTIFICAR_SUPERVISOR  aviso remoto desde la unidad de procesamiento; hoy
+#                         el unico aviso remoto es el que emite la pulsera
+#                         ante una interrupcion imprevista (apartado 8.6)
+# La FSM las emite igual para que la logica de decision ya este completa y
+# verificada. El dia que exista el actuador alcanza con registrarlo: declara
+# el tipo en tipos_soportados() y empieza a recibirlas, sin tocar la FSM ni
+# esta clase. Mientras tanto se contabilizan y se registran en nivel DEBUG,
+# no como advertencia: que no tengan destinatario es lo esperado.
+TIPOS_PREVISTOS_SIN_ACTUADOR = frozenset({
+    TipoComandoActuador.REPRODUCIR_VOZ,
+    TipoComandoActuador.NOTIFICAR_SUPERVISOR,
+})
 
 
 class DespachadorComandos:
@@ -418,10 +435,17 @@ class DespachadorComandos:
                         act.nombre, comando.tipo.name, e,
                     )
         if not alguien_lo_tomo:
-            self.log.warning(
-                "Ningun actuador soporta el comando %s (se ignora)",
-                comando.tipo.name,
-            )
+            self.stats.comandos_sin_destinatario += 1
+            if comando.tipo in TIPOS_PREVISTOS_SIN_ACTUADOR:
+                self.log.debug(
+                    "Orden %s sin actuador registrado (salida prevista para "
+                    "una etapa futura)", comando.tipo.name,
+                )
+            else:
+                self.log.warning(
+                    "Ningun actuador soporta el comando %s (se ignora)",
+                    comando.tipo.name,
+                )
 
     def _ejecutar_apagar_todo(self) -> None:
         """Llama apagar() en TODOS los actuadores, soporten lo que soporten."""

@@ -3,7 +3,7 @@ test_pre_fsm.py - Tests funcionales del Pre-FSM y sus subdetectores.
 
 Ejecutar:
     cd ~/NeuroDrive
-    python -m NeuroDrive_Core.test_pre_fsm
+    python -m NeuroDrive_Core.tests.test_pre_fsm
 
 Cada subdetector se testea individualmente con timestamps controlados.
 Luego tests de integracion del PreFSM completo con envelopes simulados.
@@ -89,7 +89,6 @@ def _config_test() -> Config:
     cfg.ojos = ConfigOjosSeccion(
         umbral_ear_cerrar=0.18,
         umbral_ear_abrir=0.22,
-        dur_min_parpadeo_seg=0.10,
         dur_max_parpadeo_seg=0.40,
         dur_min_microsueno_seg=1.5,
         refractario_parpadeo_seg=0.25,
@@ -596,8 +595,7 @@ def _():
         evento=ack,
     )
     assert pre.procesar(env) is None
-    # Pero get_evento_ack devuelve el ACK
-    assert pre.get_evento_ack(env) is ack
+    assert pre.envelopes_ignorados == 1
 
 
 @_test("PreFSM marca vision_disponible=False tras EventoFalloSensor")
@@ -803,6 +801,89 @@ def _():
     assert stats["bostezos_ultimos_15min"] >= 1, (
         f"esperaba >=1 bostezo, hay {stats['bostezos_ultimos_15min']}"
     )
+
+
+# =============================================================================
+# TESTS: BPM nulo y estado entre sesiones
+# =============================================================================
+
+print("\n--- Tests de BPM nulo y de sesion ---")
+
+
+@_test("Telemetria con bpm nulo deja el riesgo en DESCONOCIDO (no repite el ultimo)")
+def _():
+    pre = PreFSM(_config_test())
+    ep = pre.procesar(_envelope_wearable(ts=1000.0, bpm=55, secuencia=1))
+    assert ep.nivel_riesgo_bpm == NivelRiesgoBPM.CRITICO
+    # La pulsera pierde el contacto: informa que no hay dato
+    ep = pre.procesar(_envelope_wearable(ts=1002.0, bpm=None, secuencia=2))
+    assert ep.bpm_actual is None
+    assert ep.nivel_riesgo_bpm == NivelRiesgoBPM.DESCONOCIDO
+    # Y los eventos de vision posteriores tampoco arrastran el valor viejo
+    ep = pre.procesar(_envelope_vision(ts=1002.5, secuencia=3))
+    assert ep.nivel_riesgo_bpm == NivelRiesgoBPM.DESCONOCIDO
+    # Cuando vuelve la medicion, se usa la nueva
+    ep = pre.procesar(_envelope_wearable(ts=1004.0, bpm=75, secuencia=4))
+    assert ep.bpm_actual == 75 and ep.nivel_riesgo_bpm == NivelRiesgoBPM.NORMAL
+
+
+@_test("restaurar_bostezos carga la ventana larga y la purga sigue funcionando")
+def _():
+    pre = PreFSM(_config_test())
+    ventana = pre.detector_bostezos.ventana_larga_seg
+    ahora = 100000.0
+    pre.restaurar_bostezos([ahora - 30.0, ahora - ventana - 500.0, ahora - 10.0])
+    assert pre.get_bostezos_recientes() == [ahora - ventana - 500.0, ahora - 30.0, ahora - 10.0]
+    ep = pre.procesar(_envelope_vision(ts=ahora, secuencia=1))
+    assert ep.bostezos_ventana_larga == 2, "el bostezo fuera de la ventana debe purgarse"
+
+
+# =============================================================================
+# TESTS: factores de histeresis desde la configuracion (C11)
+# =============================================================================
+
+print("\n--- Tests de factores de histeresis ---")
+
+
+@_test("DetectorBostezos cierra en umbral * factor_mar_cierre")
+def _():
+    def bostezos(factor: float) -> int:
+        det = DetectorBostezos(ConfigBocaSeccion(
+            umbral_mar_bostezo=0.6, factor_mar_cierre=factor, dur_min_bostezo_seg=1.0))
+        t, n = 100.0, 0
+        det.procesar(0.10, t)
+        for _ in range(30):                 # 2 s con la boca bien abierta
+            t += 0.066
+            n += det.procesar(0.70, t)
+        for _ in range(30):                 # baja a 0,50 y se queda ahi
+            t += 0.066
+            n += det.procesar(0.50, t)
+        return n
+    # Con factor 0,9 el cierre es 0,54: un MAR de 0,50 ya cierra -> 1 bostezo
+    assert bostezos(0.9) == 1
+    # Con factor 0,8 el cierre es 0,48: en 0,50 la boca sigue "abierta" -> ninguno
+    assert bostezos(0.8) == 0
+
+
+@_test("DetectorCabeceos termina en umbral * factor_pitch_fin_cabeceo")
+def _():
+    def cabeceos(factor: float) -> int:
+        det = DetectorCabeceos(ConfigCabezaSeccion(
+            umbral_pitch_grados=20.0, factor_pitch_fin_cabeceo=factor,
+            dur_min_cabeceo_seg=0.8))
+        assert abs(det.umbral_pitch_fin - 20.0 * factor) < 1e-9
+        t, n = 100.0, 0
+        det.procesar(0.0, 0.0, t)
+        t += 0.066
+        det.procesar(22.0, 0.0, t)          # supera el umbral un instante
+        for _ in range(20):                 # y se queda en 18 grados 1,3 s
+            t += 0.066
+            n += det.procesar(18.0, 0.0, t)
+        return n
+    # Con 0,85 el fin es 17: en 18 sigue inclinado -> el cabeceo se confirma
+    assert cabeceos(0.85) == 1
+    # Con 0,95 el fin es 19: en 18 ya termino antes de la duracion minima
+    assert cabeceos(0.95) == 0
 
 
 # =============================================================================

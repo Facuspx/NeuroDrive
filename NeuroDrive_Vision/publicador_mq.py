@@ -31,7 +31,6 @@ Tambien soporta context manager.
 
 from __future__ import annotations
 
-import json
 import logging
 import time
 from pathlib import Path
@@ -325,15 +324,14 @@ class PublicadorMQ:
         self.drenar_al_iniciar = bool(drenar_al_iniciar)
         self.eliminar_al_detener = bool(eliminar_al_detener)
 
-        # Normalizacion del pitch (Opcion A de integracion con el Core).
-        # El Core usa un umbral de cabeceo ABSOLUTO (config.cabeza.
-        # umbral_pitch_grados = 20). Pero la pose neutra del conductor NO
-        # es 0 grados: depende de como este montada la camara (la
-        # calibracion mide un pitch_neutro tipicamente negativo).
-        # Para que el umbral absoluto del Core funcione bien, la vision
-        # NORMALIZA el pitch: le resta el pitch_neutro antes de enviarlo.
-        # Asi el Core recibe pitch "compensado por montaje", y su umbral
-        # de 20 grados pasa a significar 20 grados DESDE el neutro real.
+        # Normalizacion de los angulos.
+        # El Core compara el pitch contra un umbral fijo
+        # (config.cabeza.umbral_pitch_grados). Pero la pose neutra del
+        # conductor NO es 0 grados: depende de como este montada la camara
+        # y de como se sienta cada persona. Para que ese umbral signifique
+        # "grados DESDE la postura habitual", la vision resta el angulo
+        # neutro antes de enviar. Los neutros salen de config.yaml
+        # (cabeza.pitch_neutro_grados y los otros dos).
         #
         # IMPORTANTE (para la documentacion del TFI): con esto, el campo
         # pitch_grados del EventoVision NO es el angulo de Euler crudo,
@@ -566,15 +564,6 @@ class PublicadorMQ:
             p_ant, self.pitch_neutro,
             y_ant, self.yaw_neutro,
             r_ant, self.roll_neutro,
-        )
-
-    # Alias de compatibilidad: mantiene el nombre viejo funcionando.
-    # Si en algun lugar del codigo se llama a setear_pitch_neutro(x),
-    # seguira funcionando (solo actualiza pitch, deja yaw/roll como estaban).
-    def setear_pitch_neutro(self, pitch_neutro: float) -> None:
-        """Alias de compatibilidad. Prefiera setear_neutros_cabeza."""
-        self.setear_neutros_cabeza(
-            pitch_neutro, self.yaw_neutro, self.roll_neutro,
         )
 
     def __enter__(self) -> "PublicadorMQ":

@@ -60,34 +60,40 @@ _config_cache: Optional[Config] = None
 @dataclass
 class ConfigFSMSeccion:
     """Seccion [fsm] del config.yaml."""
-    ventana_corta_seg: float = 60.0
-    ventana_larga_seg: float = 300.0
     tiempo_para_bajar_estado_seg: float = 60.0
-    max_microsuenos_ventana_corta: int = 1
-    max_bostezos_ventana_corta: int = 3
-    max_cabeceos_ventana_corta: int = 1
-    # Mejoras de manejo de somnolencia
+    # Senales leves continuas
     calentamiento_senales_seg: float = 60.0
     persistencia_senales_leves_seg: float = 20.0
-    perclos_confirmado: float = 0.35
-    perclos_confirmado_sostenido_seg: float = 30.0
+    # PERCLOS: tres decisiones distintas, tres umbrales (no unificar)
+    perclos_corroborar_cabeceo: float = 0.30
+    perclos_senales_leves: float = 0.30
+    perclos_parpados_pesados: float = 0.35
+    perclos_parpados_pesados_sostenido_seg: float = 30.0
+    # Fatiga recurrente
     max_eventos_severos_ventana: int = 3
     ventana_episodios_seg: float = 900.0
     umbral_respuesta_lenta_ms: int = 5000
-    
 
     def __post_init__(self) -> None:
-        if self.ventana_corta_seg <= 0:
-            raise ConfigError(f"ventana_corta_seg debe ser > 0: {self.ventana_corta_seg}")
-        if self.ventana_larga_seg <= self.ventana_corta_seg:
-            raise ConfigError(
-                f"ventana_larga_seg ({self.ventana_larga_seg}) debe ser mayor "
-                f"que ventana_corta_seg ({self.ventana_corta_seg})"
-            )
         if self.tiempo_para_bajar_estado_seg <= 0:
             raise ConfigError(
                 f"tiempo_para_bajar_estado_seg debe ser > 0: "
                 f"{self.tiempo_para_bajar_estado_seg}"
+            )
+        for nombre in (
+            "perclos_corroborar_cabeceo",
+            "perclos_senales_leves",
+            "perclos_parpados_pesados",
+        ):
+            val = getattr(self, nombre)
+            # PERCLOS es una proporcion: un umbral fuera de (0, 1) no se
+            # alcanzaria nunca, o se cumpliria siempre.
+            if not (0.0 < val < 1.0):
+                raise ConfigError(f"{nombre} debe estar en (0, 1): {val}")
+        if self.perclos_parpados_pesados_sostenido_seg <= 0:
+            raise ConfigError(
+                f"perclos_parpados_pesados_sostenido_seg debe ser > 0: "
+                f"{self.perclos_parpados_pesados_sostenido_seg}"
             )
 
 
@@ -97,11 +103,13 @@ class ConfigVisionSeccion:
     fps_deseado: int = 15
     resolucion_ancho: int = 640
     resolucion_alto: int = 480
-    indice_camara: int = 0
+    # MediaPipe FaceMesh (los recibe DetectorRostro)
     confianza_minima_deteccion: float = 0.5
     confianza_minima_seguimiento: float = 0.5
-    refinar_contornos: bool = True
     max_frames_sin_rostro: int = 15
+    # Silencio maximo del programa de vision antes de declararlo fuera de
+    # servicio. Publica ~15 mensajes por segundo, haya rostro o no.
+    timeout_silencio_seg: float = 5.0
 
     def __post_init__(self) -> None:
         if not (1 <= self.fps_deseado <= 60):
@@ -124,27 +132,33 @@ class ConfigVisionSeccion:
             raise ConfigError(
                 f"max_frames_sin_rostro debe ser >= 1: {self.max_frames_sin_rostro}"
             )
+        if self.timeout_silencio_seg <= 0:
+            raise ConfigError(
+                f"timeout_silencio_seg debe ser > 0: {self.timeout_silencio_seg}"
+            )
 
 
 @dataclass
 class ConfigOjosSeccion:
     """Seccion [ojos] del config.yaml."""
-    umbral_ear_cerrar: float = 0.18
-    umbral_ear_abrir: float = 0.22
-    # Relativo unificado: si ear_base > 0, los umbrales de cierre/apertura se
-    # DERIVAN como ear_base * factor, y los absolutos de arriba se ignoran.
+    # Relativo unificado: los umbrales de ojo cerrado/abierto se DERIVAN del
+    # EAR del conductor con los ojos abiertos (ear_base, de la calibracion):
+    #     umbral_ear_cerrar = ear_base * factor_ear_cierre
+    #     umbral_ear_abrir  = ear_base * factor_ear_apertura
     # Asi la vision (pantalla) y el Core (FSM) usan un unico criterio.
     ear_base: float = 0.0
     factor_ear_cierre: float = 0.68
     factor_ear_apertura: float = 0.84
-    dur_min_parpadeo_seg: float = 0.10
+    # CAMPOS DERIVADOS: no se escriben en config.yaml. Con ear_base > 0 se
+    # calculan en __post_init__ y cualquier valor dado se pisa. Los de aca
+    # abajo solo rigen sin calibracion (ear_base = 0), que cargar_config()
+    # informa con una advertencia; tambien los usan las pruebas.
+    umbral_ear_cerrar: float = 0.18
+    umbral_ear_abrir: float = 0.22
     dur_max_parpadeo_seg: float = 0.40
     dur_min_microsueno_seg: float = 1.5
     refractario_parpadeo_seg: float = 0.25
-    parpadeos_por_minuto_normal: int = 17
     parpadeos_por_minuto_alerta: int = 10
-    tiempo_parpadeos_bajos_seg: float = 30.0
-    alpha_suavizado_ear: float = 0.5
 
     def __post_init__(self) -> None:
         # Relativo unificado: si hay ear_base calibrado, derivar los umbrales.
@@ -167,19 +181,19 @@ class ConfigOjosSeccion:
                 f"umbral_ear_cerrar ({self.umbral_ear_cerrar}) debe ser menor que "
                 f"umbral_ear_abrir ({self.umbral_ear_abrir}) para tener histeresis"
             )
-        if self.dur_min_parpadeo_seg >= self.dur_max_parpadeo_seg:
+        if self.dur_max_parpadeo_seg <= 0:
             raise ConfigError(
-                f"dur_min_parpadeo_seg ({self.dur_min_parpadeo_seg}) debe ser menor "
-                f"que dur_max_parpadeo_seg ({self.dur_max_parpadeo_seg})"
+                f"dur_max_parpadeo_seg debe ser > 0: {self.dur_max_parpadeo_seg}"
             )
         if self.dur_min_microsueno_seg <= self.dur_max_parpadeo_seg:
             raise ConfigError(
                 f"dur_min_microsueno_seg ({self.dur_min_microsueno_seg}) debe ser "
                 f"mayor que dur_max_parpadeo_seg ({self.dur_max_parpadeo_seg})"
             )
-        if not (0.0 <= self.alpha_suavizado_ear <= 1.0):
+        if self.parpadeos_por_minuto_alerta <= 0:
             raise ConfigError(
-                f"alpha_suavizado_ear fuera de [0,1]: {self.alpha_suavizado_ear}"
+                f"parpadeos_por_minuto_alerta debe ser > 0: "
+                f"{self.parpadeos_por_minuto_alerta}"
             )
 
 
@@ -187,6 +201,9 @@ class ConfigOjosSeccion:
 class ConfigBocaSeccion:
     """Seccion [boca] del config.yaml."""
     umbral_mar_bostezo: float = 0.6
+    # Histeresis: el bostezo termina cuando el MAR baja de
+    # umbral_mar_bostezo * factor_mar_cierre
+    factor_mar_cierre: float = 0.9
     dur_min_bostezo_seg: float = 1.0
     ventana_bostezos_seg: float = 900.0
     max_bostezos_ventana_larga: int = 3
@@ -194,6 +211,14 @@ class ConfigBocaSeccion:
     def __post_init__(self) -> None:
         if self.umbral_mar_bostezo <= 0:
             raise ConfigError(f"umbral_mar_bostezo debe ser > 0: {self.umbral_mar_bostezo}")
+        if not (0.0 < self.factor_mar_cierre < 1.0):
+            raise ConfigError(
+                f"factor_mar_cierre debe estar en (0, 1): {self.factor_mar_cierre}"
+            )
+        if self.ventana_bostezos_seg <= 0:
+            raise ConfigError(
+                f"ventana_bostezos_seg debe ser > 0: {self.ventana_bostezos_seg}"
+            )
         if self.dur_min_bostezo_seg <= 0:
             raise ConfigError(
                 f"dur_min_bostezo_seg debe ser > 0: {self.dur_min_bostezo_seg}"
@@ -209,18 +234,42 @@ class ConfigBocaSeccion:
 class ConfigCabezaSeccion:
     """Seccion [cabeza] del config.yaml."""
     umbral_pitch_grados: float = 20.0
+    # Histeresis: el cabeceo termina cuando el pitch baja de
+    # umbral_pitch_grados * factor_pitch_fin_cabeceo
+    factor_pitch_fin_cabeceo: float = 0.85
     dur_min_cabeceo_seg: float = 0.8
-    tiempo_calibracion_baseline_seg: float = 5.0
     umbral_yaw_max_grados: float = 35.0
+    # Postura neutra del conductor, medida en la calibracion. La vision resta
+    # estos valores antes de transmitir, de modo que el nucleo razona sobre
+    # desviaciones respecto de la postura habitual. Se copian del resultado de
+    # la calibracion, igual que ojos.ear_base. 0.0 = sin normalizar.
+    pitch_neutro_grados: float = 0.0
+    yaw_neutro_grados: float = 0.0
+    roll_neutro_grados: float = 0.0
 
     def __post_init__(self) -> None:
+        for nombre in ("pitch_neutro_grados", "yaw_neutro_grados", "roll_neutro_grados"):
+            val = getattr(self, nombre)
+            # Un neutro mayor a 60 grados indica una calibracion fallida o un
+            # valor mal copiado: con esa postura el rostro ni se detecta.
+            if not (-60.0 <= val <= 60.0):
+                raise ConfigError(f"{nombre} fuera de [-60, 60]: {val}")
         if self.umbral_pitch_grados <= 0:
             raise ConfigError(
                 f"umbral_pitch_grados debe ser > 0: {self.umbral_pitch_grados}"
             )
+        if not (0.0 < self.factor_pitch_fin_cabeceo < 1.0):
+            raise ConfigError(
+                f"factor_pitch_fin_cabeceo debe estar en (0, 1): "
+                f"{self.factor_pitch_fin_cabeceo}"
+            )
         if self.dur_min_cabeceo_seg <= 0:
             raise ConfigError(
                 f"dur_min_cabeceo_seg debe ser > 0: {self.dur_min_cabeceo_seg}"
+            )
+        if self.umbral_yaw_max_grados <= 0:
+            raise ConfigError(
+                f"umbral_yaw_max_grados debe ser > 0: {self.umbral_yaw_max_grados}"
             )
 
 
@@ -234,6 +283,8 @@ class ConfigWearableSeccion:
     timeout_ack_leve_seg: float = 30.0
     timeout_ack_medio_seg: float = 20.0
     timeout_ack_critico_seg: float = 15.0
+    # Lo que el nucleo espera por encima de la ventana de respuesta (ver yaml)
+    margen_presentacion_desafio_seg: float = 2.5
     timeout_heartbeat_seg: float = 10.0
     intervalo_envio_bpm_seg: float = 2.0
 
@@ -257,6 +308,11 @@ class ConfigWearableSeccion:
         ):
             if val <= 0:
                 raise ConfigError(f"{nombre} debe ser > 0: {val}")
+        if self.margen_presentacion_desafio_seg < 0:
+            raise ConfigError(
+                f"margen_presentacion_desafio_seg no puede ser negativo: "
+                f"{self.margen_presentacion_desafio_seg}"
+            )
         # Heartbeat debe ser mayor que intervalo de envio para no dar falsos positivos
         if self.timeout_heartbeat_seg <= self.intervalo_envio_bpm_seg * 2:
             raise ConfigError(
@@ -302,7 +358,6 @@ class ConfigIPCSeccion:
 class ConfigRedSeccion:
     """Seccion [red] del config.yaml."""
     ip_wearable: str = "192.168.4.20"
-    ip_raspberry: str = "0.0.0.0"
     puerto_udp_escucha: int = 5005
     puerto_udp_envio: int = 5006
     reenvios_comandos_criticos: int = 3
@@ -322,6 +377,11 @@ class ConfigRedSeccion:
                 f"reenvios_comandos_criticos debe ser >= 1: "
                 f"{self.reenvios_comandos_criticos}"
             )
+        if self.espaciado_reenvios_ms < 0:
+            raise ConfigError(
+                f"espaciado_reenvios_ms no puede ser negativo: "
+                f"{self.espaciado_reenvios_ms}"
+            )
 
 
 @dataclass
@@ -330,9 +390,6 @@ class ConfigIdentificadoresSeccion:
     id_camara: str = "cam-01"
     id_wearable: str = "wearable-01"
     id_core: str = "core"
-    prefijo_sesion: str = "ses"
-    prefijo_mensaje_vision: str = "vis"
-    prefijo_mensaje_wearable: str = "wea"
     prefijo_mensaje_interno: str = "int"
 
     def __post_init__(self) -> None:
@@ -340,9 +397,6 @@ class ConfigIdentificadoresSeccion:
             ("id_camara", self.id_camara),
             ("id_wearable", self.id_wearable),
             ("id_core", self.id_core),
-            ("prefijo_sesion", self.prefijo_sesion),
-            ("prefijo_mensaje_vision", self.prefijo_mensaje_vision),
-            ("prefijo_mensaje_wearable", self.prefijo_mensaje_wearable),
             ("prefijo_mensaje_interno", self.prefijo_mensaje_interno),
         ):
             if not val or not isinstance(val, str):
@@ -353,8 +407,6 @@ class ConfigIdentificadoresSeccion:
 class ConfigActuadoresSeccion:
     """Seccion [actuadores] del config.yaml."""
     buzzer_gpio_pin: int = 18
-    habilitar_voz: bool = True
-    ruta_audios_predefinidos: str = "Neuro_voz/audios/"
 
     def __post_init__(self) -> None:
         if not (0 <= self.buzzer_gpio_pin <= 40):
@@ -367,11 +419,6 @@ class ConfigActuadoresSeccion:
 class ConfigLoggingSeccion:
     """Seccion [logging] del config.yaml."""
     nivel: str = "INFO"
-    ruta_logs: str = "NeuroDrive_Core/logs/"
-    tamano_max_log_bytes: int = 10485760
-    archivos_rotados: int = 5
-    habilitar_csv_sesion: bool = True
-    ruta_csv_sesion: str = "NeuroDrive_Core/sesiones/"
 
     def __post_init__(self) -> None:
         niveles_validos = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
@@ -381,14 +428,6 @@ class ConfigLoggingSeccion:
                 f"(validos: {niveles_validos})"
             )
         self.nivel = self.nivel.upper()
-        if self.tamano_max_log_bytes < 1024:
-            raise ConfigError(
-                f"tamano_max_log_bytes muy chico: {self.tamano_max_log_bytes}"
-            )
-        if self.archivos_rotados < 1:
-            raise ConfigError(
-                f"archivos_rotados debe ser >= 1: {self.archivos_rotados}"
-            )
 
 
 @dataclass
@@ -605,6 +644,27 @@ def cargar_config(
             )
         else:
             secciones_construidas[nombre] = _construir_seccion(cls, seccion, nombre)
+
+    # Umbrales de ojos: avisar las dos situaciones que cambian el criterio
+    # sin que se note.
+    ojos_yaml = datos.get("ojos") if isinstance(datos.get("ojos"), dict) else {}
+    ojos_cfg = secciones_construidas["ojos"]
+    if ojos_cfg.ear_base <= 0.0:
+        _log.warning(
+            "ojos.ear_base no esta definido: se usan umbrales de EAR absolutos "
+            "(cerrar=%.3f, abrir=%.3f), no los del conductor. Calibrar y copiar "
+            "ear_base a config.yaml.",
+            ojos_cfg.umbral_ear_cerrar, ojos_cfg.umbral_ear_abrir,
+        )
+    else:
+        escritos = [k for k in ("umbral_ear_cerrar", "umbral_ear_abrir") if k in ojos_yaml]
+        if escritos:
+            _log.warning(
+                "Se ignoran %s de config.yaml: con ear_base definido los "
+                "umbrales se derivan (cerrar=%.3f, abrir=%.3f). Quitarlos del yaml.",
+                ", ".join(f"ojos.{k}" for k in escritos),
+                ojos_cfg.umbral_ear_cerrar, ojos_cfg.umbral_ear_abrir,
+            )
 
     # Detectar secciones extra en el YAML que no conocemos
     secciones_esperadas = {nombre for nombre, _ in mapeo_secciones}

@@ -12,7 +12,9 @@
 #
 #  Topologia:
 #    Pi (AP) -> 192.168.4.1   (gateway; escucha telemetria en 5005)
-#    Pulsera -> 192.168.4.x   (DHCP del AP; manda a la Pi)
+#    Pulsera -> 192.168.4.20  (direccion fija que establece el firmware; no
+#                              usa la asignacion automatica del AP. Escucha
+#                              ordenes en 5006)
 #
 #  USO:
 #    chmod +x neurodrive_ap.sh

@@ -25,7 +25,7 @@ import time
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from enum import IntEnum
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, Optional, Union
 
 
 # =============================================================================
@@ -219,14 +219,14 @@ class EventoWearable:
 @dataclass(frozen=True)
 class EventoAckWearable:
     """
-    Respuesta del conductor a una solicitud de confirmación táctil.
-    Cuando la FSM solicita "secuencia ACK" en estado ALERTA_MEDIA o CRÍTICO,
-    el wearable muestra una secuencia de vibraciones que el conductor debe
-    replicar tocando la pantalla en el orden correcto.
+    Respuesta del conductor a la verificación de atención.
+    En ALERTA_LEVE, ALERTA_MEDIA y CRÍTICO la FSM envía SECUENCIA_ACK. La
+    pulsera sortea K entre 1 y 4, vibra K veces y espera que el conductor
+    toque el pad número K.
     Diferenciar entre:
-      - secuencia_correcta=True  → el conductor está alerto → bajar nivel
-      - secuencia_correcta=False → el conductor está confundido → subir nivel
-      - timeout (no llega evento) → el conductor no respondió → subir a CRÍTICO
+      - secuencia_correcta=True  → tocó el pad K → bajar nivel
+      - secuencia_correcta=False → tocó otro pad → subir nivel
+      - sin evento dentro del plazo → no respondió → subir nivel
     """
     timestamp: float
     id_secuencia: int             # qué secuencia de ACK está respondiendo
@@ -522,10 +522,11 @@ class EstadoSesion:
     timestamp_guardado: float
     estado_fsm: EstadoFSM
 
-    # Contadores de ventana larga
-    bostezos_recientes: tuple = field(default_factory=tuple)   # timestamps
-    microsuenos_recientes: tuple = field(default_factory=tuple)
-    cabeceos_recientes: tuple = field(default_factory=tuple)
+    # Marcas de tiempo de los bostezos de la ventana larga (Pre-FSM)
+    bostezos_recientes: tuple = field(default_factory=tuple)
+    # Marcas de tiempo de los episodios severos (FSM): microsueños, cabeceos
+    # y demás hechos confirmados. De ellos depende la fatiga recurrente.
+    episodios_severos: tuple = field(default_factory=tuple)
 
     # Para debug/trazabilidad
     motivo_guardado: str = ""
@@ -539,8 +540,7 @@ class EstadoSesion:
             "timestamp_guardado": self.timestamp_guardado,
             "estado_fsm": int(self.estado_fsm),
             "bostezos_recientes": list(self.bostezos_recientes),
-            "microsuenos_recientes": list(self.microsuenos_recientes),
-            "cabeceos_recientes": list(self.cabeceos_recientes),
+            "episodios_severos": list(self.episodios_severos),
             "motivo_guardado": self.motivo_guardado,
         }
 
@@ -551,7 +551,7 @@ class EstadoSesion:
     def from_dict(cls, data: Dict[str, Any]) -> EstadoSesion:
         d = dict(data)
         d["estado_fsm"] = EstadoFSM(d["estado_fsm"])
-        for clave in ("bostezos_recientes", "microsuenos_recientes", "cabeceos_recientes"):
+        for clave in ("bostezos_recientes", "episodios_severos"):
             if clave in d:
                 d[clave] = tuple(d[clave])
         return cls(**d)

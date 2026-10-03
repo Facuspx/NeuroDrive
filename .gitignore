@@ -19,3 +19,15 @@ secrets.json
 # Archivos de datos o bases de datos locales (Opcional)
 *.db
 *.sqlite3
+
+# Estado del nucleo entre sesiones (lo escribe main.py en cada ejecucion)
+NeuroDrive_Core/estado_sesion.json
+NeuroDrive_Core/estado_sesion.json.tmp
+
+# Resultado de la ultima calibracion (lo escribe la vision; los valores
+# vigentes se copian a config/config.yaml)
+calibracion.json
+
+# Registros de ensayos y listado del arbol de carpetas
+*.log
+tree.txt

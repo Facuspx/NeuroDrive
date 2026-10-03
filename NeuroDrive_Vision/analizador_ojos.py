@@ -70,12 +70,18 @@ _log = logging.getLogger("NeuroDrive.AnalizadorOjos")
 #  EAR =  ---------------------
 #               2 * |P1 - P4|
 
+# La captura aplica volteo horizontal (HFLIP = True en captura_video.py), de
+# modo que la imagen que recibe MediaPipe es un espejo del conductor: su ojo
+# izquierdo queda en el lado IZQUIERDO de la imagen. MediaPipe numera a partir
+# del punto 33 el ojo que ve a la izquierda de la imagen y a partir del 263 el
+# que ve a la derecha. Si se desactiva el volteo, los dos nombres se invierten.
+
 # Indices del ojo izquierdo del CONDUCTOR (su izquierda).
-# Aparece en el lado derecho de la imagen vista por la camara.
+# Aparece en el lado izquierdo de la imagen.
 OJO_IZQ_INDICES = (33, 160, 158, 133, 153, 144)
 
 # Indices del ojo derecho del CONDUCTOR (su derecha).
-# Aparece en el lado izquierdo de la imagen.
+# Aparece en el lado derecho de la imagen.
 OJO_DER_INDICES = (263, 387, 385, 362, 380, 373)
 
 

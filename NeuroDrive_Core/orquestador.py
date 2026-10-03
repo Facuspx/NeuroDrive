@@ -19,6 +19,11 @@ En todos los casos, si la FSM produce una SalidaFSM con comandos, se despacha.
 El Orquestador recibe sus dependencias ya construidas (inyeccion), asi se
 puede testear con stubs sin hardware. El main.py arma las piezas reales.
 
+Persistencia: si se le entrega una PersistenciaSesion, guarda el estado del
+nucleo cada vez que la FSM cambia de estado o emite ordenes, en cada bostezo
+confirmado y en el apagado ordenado (ver persistencia_sesion.py). El guardado
+va DESPUES de despachar: primero sale la alerta, despues se escribe en disco.
+
 Robustez: un error procesando un evento se loguea y NO tira el bucle. Un
 sistema de seguridad no puede morir por un evento mal formado.
 """
@@ -32,11 +37,11 @@ from typing import Optional
 
 from common.contratos import (
     EventoWearable,
-    EstadoFSM,
     EventoAckWearable,
     EventoFalloSensor,
     EventoRecuperacionSensor,
 )
+from NeuroDrive_Core import persistencia_sesion
 
 
 @dataclass
@@ -46,6 +51,7 @@ class EstadisticasOrquestador:
     transiciones: int = 0
     comandos_despachados: int = 0
     errores_procesamiento: int = 0
+    sesiones_guardadas: int = 0
 
 
 class Orquestador:
@@ -56,6 +62,7 @@ class Orquestador:
         fsm,
         despachador,
         receptor_wearable=None,
+        persistencia=None,
         logger: Optional[logging.Logger] = None,
     ) -> None:
         self.gestor = gestor
@@ -63,10 +70,11 @@ class Orquestador:
         self.fsm = fsm
         self.despachador = despachador
         self.receptor = receptor_wearable
+        # PersistenciaSesion o None (sin persistencia: tests, ensayos)
+        self.persistencia = persistencia
         self.log = logger or logging.getLogger("NeuroDrive.Orquestador")
 
         self.stats = EstadisticasOrquestador()
-        self._estado_previo: Optional[EstadoFSM] = None
         self._ultimo_bpm: Optional[int] = None
         self._ultima_bateria: Optional[int] = None
         self._iniciado = False
@@ -92,6 +100,9 @@ class Orquestador:
         if not self._iniciado:
             return
         self._iniciado = False
+        # Dejar constancia del estado antes de desarmar nada: si el sistema se
+        # relanza dentro del plazo, retoma desde aca.
+        self._guardar_sesion("apagado_ordenado")
         # Apagar actuadores PRIMERO (que no quede nada vibrando/sonando),
         # despues el receptor y por ultimo el Gestor.
         try:
@@ -198,9 +209,31 @@ class Orquestador:
                 self.stats.comandos_despachados += len(salida.comandos)
             self.despachador.despachar(salida)
 
+            # Persistir cuando cambio algo que conviene recordar: una
+            # transicion, ordenes emitidas (nueva verificacion, aviso en modo
+            # degradado) o un bostezo que entro a la ventana larga.
+            hubo_bostezo = evento_proc is not None and evento_proc.bostezo
+            if salida.transicion_ocurrio or salida.comandos or hubo_bostezo:
+                self._guardar_sesion(salida.motivo_transicion or "actualizacion")
+
         except Exception as e:
             self.stats.errores_procesamiento += 1
             self.log.error("Error procesando envelope: %s", e, exc_info=True)
+
+    # ------------------------------------------------------------------
+    # Persistencia
+    # ------------------------------------------------------------------
+
+    def _guardar_sesion(self, motivo: str) -> None:
+        """Guarda el estado del nucleo. Nunca interrumpe el bucle de decision."""
+        if self.persistencia is None:
+            return
+        try:
+            estado = persistencia_sesion.capturar(self.fsm, self.pre_fsm, motivo)
+            if self.persistencia.guardar(estado):
+                self.stats.sesiones_guardadas += 1
+        except Exception as e:
+            self.log.error("No se pudo guardar el estado de sesion: %s", e)
 
     # ------------------------------------------------------------------
     def resumen(self) -> str:

@@ -3,7 +3,7 @@ test_calibrador.py - Tests funcionales de Calibrador.
 
 Ejecutar:
     cd ~/NeuroDrive
-    python -m NeuroDrive_Vision.test_calibrador
+    python -m NeuroDrive_Vision.tests.test_calibrador
 
 Tests sin hardware (18):
    1. Construccion con parametros default
@@ -413,6 +413,35 @@ else:
             assert aplicado is False
             assert ana_ojos.umbral_cierre == umbral_antes
             print(f"    (calibracion no exitosa, analizador mantiene default)")
+
+
+print("\n--- Relacion con config.yaml ---")
+
+
+@_test("bloque_config() produce YAML valido con los valores medidos")
+def _():
+    import yaml
+    res = ResultadoCalibracion(exito=True, timestamp=1.0, ear_base=0.2850,
+                               pitch_neutro=5.15, yaw_neutro=-9.47, roll_neutro=0.46)
+    datos = yaml.safe_load(res.bloque_config())
+    assert datos["ojos"]["ear_base"] == 0.285
+    assert datos["cabeza"] == {"pitch_neutro_grados": 5.2, "yaw_neutro_grados": -9.5,
+                               "roll_neutro_grados": 0.5}, datos["cabeza"]
+
+
+@_test("diferencias_con_config() avisa solo lo que excede la tolerancia")
+def _():
+    from types import SimpleNamespace as NS
+    res = ResultadoCalibracion(exito=True, timestamp=1.0, ear_base=0.285,
+                               pitch_neutro=5.1, yaw_neutro=-9.5, roll_neutro=0.5)
+    igual = NS(ojos=NS(ear_base=0.29),
+               cabeza=NS(pitch_neutro_grados=5.0, yaw_neutro_grados=-9.0, roll_neutro_grados=0.0))
+    assert res.diferencias_con_config(igual) == []
+    distinto = NS(ojos=NS(ear_base=0.31),
+                  cabeza=NS(pitch_neutro_grados=0.0, yaw_neutro_grados=-9.5, roll_neutro_grados=0.5))
+    difs = res.diferencias_con_config(distinto)
+    assert len(difs) == 2, difs
+    assert difs[0].startswith("ojos.ear_base") and difs[1].startswith("cabeza.pitch_neutro_grados")
 
 
 print("\n--- Resumen ---")

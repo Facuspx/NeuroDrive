@@ -3,7 +3,7 @@ test_adaptador_mq.py - Tests funcionales del adaptador POSIX MQ.
 
 Ejecutar:
     cd ~/NeuroDrive
-    python -m NeuroDrive_Core.test_adaptador_mq
+    python -m NeuroDrive_Core.tests.test_adaptador_mq
 
 IMPORTANTE: estos tests CREAN colas reales en el kernel. Cada test
 limpia su propia cola al terminar. Si un test crashea, podrian

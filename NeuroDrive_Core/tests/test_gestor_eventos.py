@@ -3,7 +3,7 @@ test_gestor_eventos.py - Tests funcionales del Gestor de Eventos.
 
 Ejecutar:
     cd ~/NeuroDrive
-    python -m NeuroDrive_Core.test_gestor_eventos
+    python -m NeuroDrive_Core.tests.test_gestor_eventos
 
 IMPORTANTE:
 - Crean colas POSIX MQ reales. Cada test limpia las suyas.
@@ -54,6 +54,7 @@ from NeuroDrive_Core.gestor_eventos import GestorEventos
 from NeuroDrive_Core.config_loader import (
     Config,
     ConfigIPCSeccion,
+    ConfigVisionSeccion,
     ConfigWearableSeccion,
     ConfigIdentificadoresSeccion,
 )
@@ -94,6 +95,7 @@ _contador_test = 0
 def _config_para_test(
     heartbeat_seg: float = 1.0,
     intervalo_bpm_seg: float = 0.3,
+    silencio_vision_seg: Optional[float] = None,
 ) -> tuple[Config, str, str]:
     """
     Construye un Config minimo para testing con colas unicas y heartbeats rapidos.
@@ -122,6 +124,11 @@ def _config_para_test(
     config.wearable = ConfigWearableSeccion(
         timeout_heartbeat_seg=heartbeat_seg,
         intervalo_envio_bpm_seg=intervalo_bpm_seg,
+    )
+    config.vision = ConfigVisionSeccion(
+        timeout_silencio_seg=(
+            silencio_vision_seg if silencio_vision_seg is not None else heartbeat_seg
+        ),
     )
     config.identificadores = ConfigIdentificadoresSeccion()
 
@@ -653,6 +660,26 @@ def _():
     finally:
         parar_drenado.set()
         hilo_drenado.join(timeout=1.0)
+        _detener_todo(gestor, [prod_v, prod_w], config)
+
+
+@_test("Cada fuente usa su propio plazo de silencio")
+def _():
+    # Vision: 0,6 s. Pulsera: 30 s. Con ambas en silencio, en 2,5 s solo
+    # debe declararse caida la vision.
+    config, _, _ = _config_para_test(
+        heartbeat_seg=30.0, intervalo_bpm_seg=2.0, silencio_vision_seg=0.6,
+    )
+    gestor, prod_v, prod_w = _gestor_con_productores(config)
+    try:
+        caidos = set()
+        limite = time.time() + 2.5
+        while time.time() < limite:
+            env = gestor.obtener_evento(timeout=0.1)
+            if env is not None and env.tipo == TipoMensaje.FALLO_SENSOR:
+                caidos.add(env.evento.sensor_afectado)
+        assert caidos == {OrigenEvento.VISION}, f"fuentes declaradas caidas: {caidos}"
+    finally:
         _detener_todo(gestor, [prod_v, prod_w], config)
 
 

@@ -3,7 +3,7 @@ test_publicador_mq.py - Tests funcionales de PublicadorMQ.
 
 Ejecutar:
     cd ~/NeuroDrive
-    python -m NeuroDrive_Vision.test_publicador_mq
+    python -m NeuroDrive_Vision.tests.test_publicador_mq
 
 Tests sin hardware (16):
    1. Construccion con parametros default

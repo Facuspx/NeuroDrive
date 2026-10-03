@@ -3,7 +3,7 @@ test_captura_video.py - Tests funcionales de CapturaVideo.
 
 Ejecutar:
     cd ~/NeuroDrive
-    python -m NeuroDrive_Vision.test_captura_video
+    python -m NeuroDrive_Vision.tests.test_captura_video
 
 REQUIERE: Pi Camera CSI conectada y rpicam-vid instalado.
 

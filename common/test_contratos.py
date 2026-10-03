@@ -431,11 +431,11 @@ def _():
         timestamp_guardado=ahora,
         estado_fsm=EstadoFSM.ALERTA_LEVE,
         bostezos_recientes=(ahora - 100, ahora - 50),
-        microsuenos_recientes=(),
-        cabeceos_recientes=(ahora - 30,),
+        episodios_severos=(ahora - 30,),
         motivo_guardado="apagado manual",
     )
     assert len(s.bostezos_recientes) == 2
+    assert len(s.episodios_severos) == 1
     assert s.estado_fsm == EstadoFSM.ALERTA_LEVE
 
 
@@ -445,8 +445,7 @@ def _():
         timestamp_guardado=time.time(),
         estado_fsm=EstadoFSM.PRE_ALERTA,
         bostezos_recientes=(1.0, 2.0, 3.0),
-        microsuenos_recientes=(10.5,),
-        cabeceos_recientes=(),
+        episodios_severos=(10.5,),
         motivo_guardado="test",
     )
     s2 = EstadoSesion.from_json(s1.to_json())

@@ -3,7 +3,7 @@ test_fsm.py - Tests funcionales de la FSM pura.
 
 Ejecutar:
     cd ~/NeuroDrive
-    python -m NeuroDrive_Core.test_fsm
+    python -m NeuroDrive_Core.tests.test_fsm
 
 Valida:
   1. Transiciones por cada par (estado origen -> estado destino).
@@ -159,14 +159,31 @@ def _():
     assert cfg.timeout_ack_critico_seg == 15.0
 
 
-@_test("ConfigFSM se construye desde dict")
+@_test("ConfigFSM.desde_config toma cada parametro de su seccion")
 def _():
-    cfg = ConfigFSM.desde_dict({
-        "fsm": {"tiempo_para_bajar_estado_seg": 90},
-        "wearable": {"timeout_ack_leve_seg": 25}
-    })
+    from types import SimpleNamespace as NS
+    config = NS(
+        fsm=NS(tiempo_para_bajar_estado_seg=90, calentamiento_senales_seg=45,
+               persistencia_senales_leves_seg=15, perclos_corroborar_cabeceo=0.28,
+               perclos_senales_leves=0.31, perclos_parpados_pesados=0.4,
+               perclos_parpados_pesados_sostenido_seg=20,
+               max_eventos_severos_ventana=4, ventana_episodios_seg=600,
+               umbral_respuesta_lenta_ms=4000),
+        wearable=NS(timeout_ack_leve_seg=10, timeout_ack_medio_seg=7,
+                    timeout_ack_critico_seg=6, margen_presentacion_desafio_seg=2.5),
+        boca=NS(max_bostezos_ventana_larga=5),
+        ojos=NS(parpadeos_por_minuto_alerta=9),
+    )
+    cfg = ConfigFSM.desde_config(config)
     assert cfg.tiempo_para_bajar_estado_seg == 90.0
-    assert cfg.timeout_ack_leve_seg == 25.0
+    assert (cfg.timeout_ack_leve_seg, cfg.timeout_ack_medio_seg,
+            cfg.timeout_ack_critico_seg) == (10.0, 7.0, 6.0)
+    assert cfg.margen_presentacion_desafio_seg == 2.5
+    assert cfg.max_bostezos_ventana_larga == 5          # sale de [boca]
+    assert cfg.parpadeos_por_minuto_alerta == 9.0       # sale de [ojos]
+    assert (cfg.perclos_corroborar_cabeceo, cfg.perclos_senales_leves,
+            cfg.perclos_parpados_pesados) == (0.28, 0.31, 0.4)
+    assert cfg.umbral_respuesta_lenta_ms == 4000
 
 
 # =============================================================================
@@ -267,14 +284,16 @@ def _():
     assert salida.estado_actual == EstadoFSM.ALERTA_LEVE
 
 
-@_test("S1 -> S2 emite comandos VIBRAR_LEVE + REPRODUCIR_VOZ")
+@_test("S1 -> S2 emite BUZZER_CORTO + SECUENCIA_ACK + REPRODUCIR_VOZ")
 def _():
     fsm = crear_fsm(EstadoFSM.PRE_ALERTA)
     salida = fsm.procesar_evento(ev_bostezo(t=100))
     tipos = {c.tipo for c in salida.comandos}
-    assert TipoComandoActuador.VIBRAR_LEVE in tipos
-    assert TipoComandoActuador.REPRODUCIR_VOZ in tipos
-    assert TipoComandoActuador.SECUENCIA_ACK in tipos   # ahora LEVE desafia
+    assert tipos == {
+        TipoComandoActuador.BUZZER_CORTO,
+        TipoComandoActuador.SECUENCIA_ACK,
+        TipoComandoActuador.REPRODUCIR_VOZ,
+    }, tipos
 
 
 # =============================================================================
@@ -443,16 +462,19 @@ def _():
     assert salida.estado_actual == EstadoFSM.CRITICO
 
 
-@_test("S4 emite VIBRAR_FUERTE + BUZZER_CONTINUO + NOTIFICAR_SUPERVISOR")
+@_test("S4 emite BUZZER_CONTINUO + SECUENCIA_ACK + voz + NOTIFICAR_SUPERVISOR")
 def _():
     fsm = crear_fsm(EstadoFSM.ALERTA_MEDIA)
     salida = fsm.procesar_evento(
         ev_cabeceo(t=100, nivel_riesgo_bpm=NivelRiesgoBPM.CRITICO)
     )
     tipos = {c.tipo for c in salida.comandos}
-    assert TipoComandoActuador.VIBRAR_FUERTE in tipos
-    assert TipoComandoActuador.BUZZER_CONTINUO in tipos
-    assert TipoComandoActuador.NOTIFICAR_SUPERVISOR in tipos
+    assert tipos == {
+        TipoComandoActuador.BUZZER_CONTINUO,
+        TipoComandoActuador.SECUENCIA_ACK,
+        TipoComandoActuador.REPRODUCIR_VOZ,
+        TipoComandoActuador.NOTIFICAR_SUPERVISOR,
+    }, tipos
 
 
 # =============================================================================
@@ -563,18 +585,62 @@ def _():
     assert salida.estado_actual == EstadoFSM.MODO_DEGRADADO
 
 
-@_test("En MODO_DEGRADADO los eventos normales se ignoran")
-def _():
+def _fsm_degradada(sensor=OrigenEvento.WEARABLE) -> FSM:
+    """FSM en MODO_DEGRADADO por la caida de `sensor` (por defecto, la pulsera)."""
     fsm = crear_fsm(EstadoFSM.NORMAL)
     fsm.procesar_evento(EventoFalloSensor(
-        timestamp=100.0,
-        sensor_afectado=OrigenEvento.VISION,
-        motivo="caida",
-        severidad=2,
+        timestamp=100.0, sensor_afectado=sensor, motivo="caida", severidad=2,
     ))
-    # Bostezo durante MODO_DEGRADADO: no debe escalar
+    assert fsm.get_estado_actual() == EstadoFSM.MODO_DEGRADADO
+    return fsm
+
+
+@_test("En MODO_DEGRADADO un bostezo no asciende ni produce ordenes")
+def _():
+    fsm = _fsm_degradada()
     salida = fsm.procesar_evento(ev_bostezo(t=120))
     assert salida.estado_actual == EstadoFSM.MODO_DEGRADADO
+    assert len(salida.comandos) == 0
+
+
+@_test("Degradado con vision viva: un microsueno dispara aviso sonoro sin verificacion")
+def _():
+    fsm = _fsm_degradada(OrigenEvento.WEARABLE)
+    salida = fsm.procesar_evento(ev_microsueno(t=120, wearable_disponible=False))
+    assert salida.estado_actual == EstadoFSM.MODO_DEGRADADO, "el estado no cambia"
+    assert not salida.transicion_ocurrio
+    tipos = [c.tipo for c in salida.comandos]
+    assert tipos == [TipoComandoActuador.BUZZER_LARGO], tipos
+    # Sin pulsera no tiene sentido plantear una verificacion
+    assert fsm.get_estado_interno().id_secuencia_ack_pendiente is None
+    # El episodio queda registrado para la fatiga recurrente
+    assert fsm.get_episodios_severos() == [120]
+
+
+@_test("Degradado: cabeceo corroborado avisa; sin corroborar, no")
+def _():
+    fsm = _fsm_degradada()
+    sin_corroborar = fsm.procesar_evento(ev_cabeceo(t=120, perclos=0.1))
+    assert len(sin_corroborar.comandos) == 0
+    corroborado = fsm.procesar_evento(ev_cabeceo(t=130, perclos=0.45))
+    assert [c.tipo for c in corroborado.comandos] == [TipoComandoActuador.BUZZER_LARGO]
+
+
+@_test("Degradado: sin rostro o con ventana no confiable no se avisa")
+def _():
+    fsm = _fsm_degradada()
+    s1 = fsm.procesar_evento(ev_microsueno(t=120, ventana_no_confiable=True))
+    s2 = fsm.procesar_evento(ev_microsueno(t=121, vision_disponible=False))
+    assert len(s1.comandos) == 0 and len(s2.comandos) == 0
+    assert fsm.get_episodios_severos() == []
+
+
+@_test("Degradado: el aviso no se repite en los eventos siguientes")
+def _():
+    fsm = _fsm_degradada()
+    fsm.procesar_evento(ev_microsueno(t=120))
+    salida = fsm.procesar_evento(ev_normal(t=121))
+    assert len(salida.comandos) == 0
 
 
 # =============================================================================
@@ -713,7 +779,7 @@ def _():
     assert salida.estado_actual == EstadoFSM.CRITICO
     tipos = {c.tipo for c in salida.comandos}
     assert TipoComandoActuador.SECUENCIA_ACK in tipos, "deberia re-desafiar"
-    assert TipoComandoActuador.VIBRAR_FUERTE in tipos
+    assert TipoComandoActuador.BUZZER_CONTINUO in tipos
     nuevo = fsm.get_estado_interno().id_secuencia_ack_pendiente
     assert nuevo is not None and nuevo != id_seq, "desafio nuevo con id distinto"
 
@@ -798,6 +864,177 @@ def _():
                               secuencia_correcta=True, tiempo_respuesta_ms=7000)
     salida = fsm.procesar_evento(lento)
     assert salida.estado_actual == EstadoFSM.ALERTA_LEVE, "lento baja 1 nivel, no a PRE_ALERTA"
+
+
+# =============================================================================
+# TESTS: plazo de la verificacion alineado con la pulsera (C5)
+# =============================================================================
+
+print("\n--- Tests del plazo de verificacion ---")
+
+
+def _fsm_plazos() -> FSM:
+    """FSM con los plazos de produccion: ventanas 10/7/7 s y margen 2,5 s."""
+    return FSM(
+        ConfigFSM(
+            timeout_ack_leve_seg=10.0,
+            timeout_ack_medio_seg=7.0,
+            timeout_ack_critico_seg=7.0,
+            margen_presentacion_desafio_seg=2.5,
+        ),
+        estado_inicial=EstadoFSM.PRE_ALERTA,
+    )
+
+
+@_test("SECUENCIA_ACK lleva la ventana del nivel en duracion_ms")
+def _():
+    fsm = _fsm_plazos()
+
+    def ventana(salida):
+        return [c for c in salida.comandos
+                if c.tipo == TipoComandoActuador.SECUENCIA_ACK][0].duracion_ms
+
+    s_leve = fsm.procesar_evento(ev_bostezo(t=100))            # -> ALERTA_LEVE
+    assert ventana(s_leve) == 10000, ventana(s_leve)
+    s_media = fsm.procesar_evento(ev_microsueno(t=101))        # -> ALERTA_MEDIA
+    assert ventana(s_media) == 7000, ventana(s_media)
+    s_crit = fsm.procesar_evento(
+        ev_cabeceo(t=102, nivel_riesgo_bpm=NivelRiesgoBPM.CRITICO))   # -> CRITICO
+    assert ventana(s_crit) == 7000, ventana(s_crit)
+
+
+@_test("La FSM no da por vencida la verificacion antes de ventana + margen")
+def _():
+    fsm = _fsm_plazos()
+    fsm.procesar_evento(ev_bostezo(t=100))                     # -> ALERTA_LEVE
+    # A los 12,4 s la pulsera todavia puede aceptar el toque (2 s de pulsos
+    # + 10 s de ventana): la FSM debe seguir esperando.
+    salida = fsm.procesar_evento(ev_normal(t=112.4))
+    assert salida.estado_actual == EstadoFSM.ALERTA_LEVE
+    # A los 12,5 s (ventana 10 + margen 2,5) vence.
+    salida = fsm.procesar_evento(ev_normal(t=112.5))
+    assert salida.estado_actual == EstadoFSM.ALERTA_MEDIA
+    assert salida.motivo_transicion == "timeout_ack_leve"
+
+
+@_test("Respuesta al filo de la ventana de la pulsera: la FSM la acepta")
+def _():
+    fsm = _fsm_plazos()
+    fsm.procesar_evento(ev_bostezo(t=100))                     # -> ALERTA_LEVE
+    fsm.procesar_evento(ev_microsueno(t=101))                  # -> ALERTA_MEDIA
+    id_seq = fsm.get_estado_interno().id_secuencia_ack_pendiente
+    # Peor caso: 4 pulsos (2,0 s) y toque a los 6,9 s de una ventana de 7 s.
+    # La respuesta llega 8,9 s despues del pedido. Con el plazo anterior
+    # (7 s contados desde el pedido) la FSM ya habria ascendido a CRITICO.
+    fsm.procesar_evento(ev_normal(t=109.8))
+    assert fsm.get_estado_actual() == EstadoFSM.ALERTA_MEDIA, "no debe vencer todavia"
+    ack = EventoAckWearable(timestamp=109.9, id_secuencia=id_seq,
+                            secuencia_correcta=True, tiempo_respuesta_ms=6900)
+    salida = fsm.procesar_evento(ack)
+    assert salida.motivo_transicion.startswith("ack_correcto"), salida.motivo_transicion
+    # Correcta pero lenta (> 5 s): baja un nivel, no asciende.
+    assert salida.estado_actual == EstadoFSM.ALERTA_LEVE
+
+
+# =============================================================================
+# TESTS: la pulsera solo recibe la verificacion
+# =============================================================================
+
+print("\n--- Tests de las ordenes hacia la pulsera ---")
+
+_VIBRAR = {
+    TipoComandoActuador.VIBRAR_LEVE,
+    TipoComandoActuador.VIBRAR_MEDIO,
+    TipoComandoActuador.VIBRAR_FUERTE,
+}
+
+
+@_test("Ninguna alerta emite VIBRAR_*: a la pulsera solo le llega SECUENCIA_ACK")
+def _():
+    fsm = _fsm_plazos()
+    salidas = [
+        fsm.procesar_evento(ev_bostezo(t=100)),                 # -> ALERTA_LEVE
+        fsm.procesar_evento(ev_microsueno(t=101)),              # -> ALERTA_MEDIA
+        fsm.procesar_evento(
+            ev_cabeceo(t=102, nivel_riesgo_bpm=NivelRiesgoBPM.CRITICO)),   # -> CRITICO
+        fsm.procesar_evento(ev_normal(t=120)),                  # nueva verificacion
+    ]
+    for s in salidas:
+        tipos = [c.tipo for c in s.comandos]
+        assert not (_VIBRAR & set(tipos)), f"{s.estado_actual.name}: {tipos}"
+        assert tipos.count(TipoComandoActuador.SECUENCIA_ACK) == 1, tipos
+
+
+# =============================================================================
+# TESTS: umbrales de PERCLOS y de parpadeo configurables (C7)
+# =============================================================================
+
+print("\n--- Tests de umbrales configurables ---")
+
+
+@_test("perclos_corroborar_cabeceo decide si un cabeceo es de sueno")
+def _():
+    # PERCLOS 0,25 con el umbral por defecto (0,30): no corrobora -> PRE_ALERTA
+    fsm = crear_fsm()
+    salida = fsm.procesar_evento(ev_cabeceo(t=100, perclos=0.25))
+    assert salida.estado_actual == EstadoFSM.PRE_ALERTA
+    # El mismo hecho con el umbral en 0,20: corrobora -> ALERTA_LEVE
+    fsm = FSM(ConfigFSM(perclos_corroborar_cabeceo=0.20))
+    salida = fsm.procesar_evento(ev_cabeceo(t=100, perclos=0.25))
+    assert salida.estado_actual == EstadoFSM.ALERTA_LEVE
+
+
+@_test("perclos_senales_leves es independiente del umbral de corroboracion")
+def _():
+    # Con el umbral de senales leves en 0,50 un PERCLOS de 0,40 sostenido no
+    # alcanza para PRE_ALERTA, aunque supere el de corroboracion (0,30).
+    fsm = FSM(ConfigFSM(perclos_senales_leves=0.50, perclos_parpados_pesados=0.90))
+    for t in range(100, 130):
+        salida = fsm.procesar_evento(ev_normal(t=t, perclos=0.40, parpadeos_por_minuto=15.0))
+    assert salida.estado_actual == EstadoFSM.NORMAL
+    # Con el valor por defecto (0,30) el mismo PERCLOS si es senal leve.
+    fsm = FSM(ConfigFSM(perclos_parpados_pesados=0.90))
+    for t in range(100, 130):
+        salida = fsm.procesar_evento(ev_normal(t=t, perclos=0.40, parpadeos_por_minuto=15.0))
+    assert salida.estado_actual == EstadoFSM.PRE_ALERTA
+
+
+@_test("parpadeos_por_minuto_alerta sale de la configuracion")
+def _():
+    def correr(cfg):
+        fsm = FSM(cfg)
+        fsm.procesar_evento(ev_normal(t=1, parpadeos_por_minuto=15.0))   # fija el inicio
+        for t in range(100, 130):                                       # pasado el calentamiento
+            salida = fsm.procesar_evento(ev_normal(t=t, parpadeos_por_minuto=12.0))
+        return salida.estado_actual
+    assert correr(ConfigFSM()) == EstadoFSM.NORMAL                      # 12 >= 10
+    assert correr(ConfigFSM(parpadeos_por_minuto_alerta=14.0)) == EstadoFSM.PRE_ALERTA
+
+
+# =============================================================================
+# TESTS: episodios de la sesion anterior
+# =============================================================================
+
+print("\n--- Tests de episodios previos ---")
+
+
+@_test("Con 3 episodios previos recientes, un microsueno va directo a ALERTA_MEDIA")
+def _():
+    fsm = FSM(ConfigFSM(), estado_inicial=EstadoFSM.PRE_ALERTA,
+              episodios_previos=[700.0, 800.0, 900.0])
+    salida = fsm.procesar_evento(ev_microsueno(t=1000))
+    assert salida.estado_actual == EstadoFSM.ALERTA_MEDIA
+    assert salida.motivo_transicion == "confirmado_fatiga_recurrente"
+
+
+@_test("Los episodios previos fuera de la ventana de 15 min no cuentan")
+def _():
+    fsm = FSM(ConfigFSM(), estado_inicial=EstadoFSM.PRE_ALERTA,
+              episodios_previos=[10.0, 20.0, 30.0])
+    salida = fsm.procesar_evento(ev_microsueno(t=5000))
+    assert salida.estado_actual == EstadoFSM.ALERTA_LEVE
+    assert fsm.get_episodios_severos() == [5000]
+
 
 # =============================================================================
 # RESUMEN
