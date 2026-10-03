@@ -16,17 +16,46 @@
 #                              usa la asignacion automatica del AP. Escucha
 #                              ordenes en 5006)
 #
+#  Clave de la red:
+#    No esta escrita en este archivo. Se lee de config/ap.env, que no se
+#    versiona (ver config/ap.env.ejemplo). Tambien se la puede pasar por
+#    entorno:  WIFI_PASS=... ./neurodrive_ap.sh up
+#    Debe ser la misma que PI_PASS en components/red/credenciales.h del firmware.
+#
 #  USO:
 #    chmod +x neurodrive_ap.sh
 #    ./neurodrive_ap.sh up | down | status | recrear
 # ==========================================================================
 
 SSID_NAME="NeuroDrive_AP"
-WIFI_PASS="paquito2025"
 CON_NAME="neurodrive-ap"
 PI_IP="192.168.4.1"
 WIFI_IFACE="wlan0"
 CANAL="6"                 # 1-11 (el ESP32-S3 no ve canales altos ni 'auto')
+
+# Carpeta de este script, para ubicar config/ap.env sin depender de desde
+# donde se lo ejecute.
+DIR_SCRIPT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ARCHIVO_CLAVE="$DIR_SCRIPT/config/ap.env"
+
+# Deja la clave en WIFI_PASS o termina con un mensaje que dice que falta.
+# Solo la necesitan 'up' y 'recrear'; 'down' y 'status' funcionan sin ella.
+cargar_clave() {
+    if [ -z "$WIFI_PASS" ] && [ -f "$ARCHIVO_CLAVE" ]; then
+        # shellcheck disable=SC1090
+        . "$ARCHIVO_CLAVE"
+    fi
+    if [ -z "$WIFI_PASS" ]; then
+        echo "[X] Falta la clave del punto de acceso."
+        echo "    Crear $ARCHIVO_CLAVE a partir de config/ap.env.ejemplo,"
+        echo "    o ejecutar:  WIFI_PASS=... $0 $1"
+        exit 1
+    fi
+    if [ "${#WIFI_PASS}" -lt 8 ] || [ "${#WIFI_PASS}" -gt 63 ]; then
+        echo "[X] La clave debe tener entre 8 y 63 caracteres (requisito de WPA2)."
+        exit 1
+    fi
+}
 
 aplicar_ajustes() {
     nmcli con modify "$CON_NAME" 802-11-wireless.mode ap
@@ -55,8 +84,9 @@ levantar() {
     echo "[*] Levantando AP '$SSID_NAME' (canal $CANAL, WPA2)..."
     crear_si_no_existe
     if nmcli con up "$CON_NAME"; then
-        echo "[ok] AP arriba.  SSID=$SSID_NAME  clave=$WIFI_PASS  IP=$PI_IP  canal=$CANAL"
-        echo "    Firmware:  RED_SSID=\"$SSID_NAME\"  RED_PASS=\"$WIFI_PASS\"  PI_IP_RESPALDO=\"$PI_IP\""
+        echo "[ok] AP arriba.  SSID=$SSID_NAME  IP=$PI_IP  canal=$CANAL"
+        echo "    En el firmware (components/red/credenciales.h): PI_SSID=\"$SSID_NAME\""
+        echo "    y PI_PASS con la misma clave que config/ap.env."
     else
         echo "[X] No se pudo levantar. Revisar que $WIFI_IFACE soporte modo AP."
         exit 1
@@ -91,9 +121,9 @@ estado() {
 }
 
 case "$1" in
-    up)      levantar ;;
+    up)      cargar_clave up;      levantar ;;
     down)    apagar ;;
     status)  estado ;;
-    recrear) recrear ;;
+    recrear) cargar_clave recrear; recrear ;;
     *)       echo "Uso: $0 {up|down|status|recrear}" ; exit 1 ;;
 esac

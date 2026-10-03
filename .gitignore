@@ -31,3 +31,17 @@ calibracion.json
 # Registros de ensayos y listado del arbol de carpetas
 *.log
 tree.txt
+
+# Paquetes de entrega descargados dentro del repo
+*.zip
+
+# Claves (cada una tiene su plantilla .ejemplo versionada)
+config/ap.env
+NeuroDrive_Firmware/components/red/credenciales.h
+
+# Compilacion del firmware y del banco de pruebas
+NeuroDrive_Firmware/build/
+NeuroDrive_Firmware/banco/build/
+NeuroDrive_Firmware/sdkconfig.old
+NeuroDrive_Firmware/managed_components/
+NeuroDrive_Firmware/dependencies.lock

@@ -92,7 +92,10 @@ NeuroDrive/
 │   └── tests/
 ├── NeuroDrive_Wearable/       protocolo UDP, actuador, receptor y simulador
 ├── integracion/               pruebas entre programas
-└── herramientas/              bancos de prueba que no usan el núcleo
+├── herramientas/              bancos de prueba que no usan el núcleo
+└── NeuroDrive_Firmware/       firmware de la pulsera (proyecto ESP-IDF 5.2)
+    ├── main/  components/     red, motor y pads, pulso, batería e indicadores
+    └── banco/                 banco de pruebas del firmware en PC
 ```
 
 ## Requisitos
@@ -104,6 +107,18 @@ NeuroDrive/
 - NetworkManager, para el punto de acceso
 
 Todos los comandos se ejecutan desde la raíz del repositorio.
+
+## Claves
+
+Ninguna clave está en el repositorio. Cada una se toma de un archivo local que
+git ignora, y que se crea a partir de su plantilla:
+
+| Archivo local | Plantilla | Contiene |
+|---|---|---|
+| `config/ap.env` | `config/ap.env.ejemplo` | Clave del punto de acceso de la Raspberry |
+| `NeuroDrive_Firmware/components/red/credenciales.h` | `credenciales.ejemplo.h`, en la misma carpeta | Las dos redes de la pulsera y el servicio de mensajería |
+
+La clave del punto de acceso tiene que ser la misma en los dos archivos.
 
 ## Puesta en marcha
 
@@ -209,6 +224,19 @@ python -m NeuroDrive_Vision.test_captura_archivo
 
 # Entre programas
 python -m integracion.test_ipc_vision_core
+```
+
+## Banco de pruebas del firmware
+
+`red.c` y `motor_pads.c` se compilan sin modificar para la PC, con el Wi-Fi, el
+motor, los pads y el reloj reemplazados por funciones que maneja el test. Del
+otro lado van el actuador y el receptor reales de la Raspberry, por UDP sobre
+localhost. Verifica la máquina de conectividad, el descarte de repetidas, la
+ventana de respuesta, la respuesta triple y el aviso remoto, sin la pulsera.
+
+```bash
+sudo apt install libcjson-dev          # una sola vez
+./NeuroDrive_Firmware/banco/correr.sh  # 23 casos; no correr junto con main.py
 ```
 
 ## Ensayo sin la pulsera
