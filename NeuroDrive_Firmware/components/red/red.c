@@ -16,6 +16,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <sys/socket.h>
+#include <sys/select.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include "freertos/FreeRTOS.h"
@@ -26,6 +27,7 @@
 #include "esp_log.h"
 #include "esp_http_client.h"
 #include "esp_crt_bundle.h"
+#include "esp_pm.h"
 #include "cJSON.h"
 
 #include "red.h"
@@ -290,7 +292,18 @@ static bool avisar_perdida(void) {
 }
 
 static void tarea_aviso(void *pv) {
-    s_aviso = avisar_perdida() ? AVISO_OK : AVISO_FALLO;
+    // La negociacion TLS es el unico trabajo de calculo pesado del firmware.
+    // Con la gestion de energia activa el procesador funciona a frecuencia
+    // reducida; durante el aviso se le pide la maxima. Sin gestion de energia
+    // el bloqueo no se crea (queda en NULL) y no hace nada.
+    esp_pm_lock_handle_t lock = NULL;
+    if (esp_pm_lock_create(ESP_PM_CPU_FREQ_MAX, 0, "aviso", &lock) != ESP_OK) lock = NULL;
+    if (lock) esp_pm_lock_acquire(lock);
+
+    aviso_estado_t resultado = avisar_perdida() ? AVISO_OK : AVISO_FALLO;
+
+    if (lock) { esp_pm_lock_release(lock); esp_pm_lock_delete(lock); }
+    s_aviso = resultado;
     vTaskDelete(NULL);
 }
 
@@ -661,6 +674,46 @@ static void conectividad_update(void) {
 }
 
 // ===========================================================================
+// REPOSO
+// ===========================================================================
+bool red_en_reposo(void) {
+    if (conec == RED_OPERANDO_PI) {
+        return wifi_conectado && ack_copias_pendientes == 0;
+    }
+    if (conec == RED_MODO_TESTIGO) {
+        return fase == FASE_REPOSO && s_aviso != AVISO_EN_CURSO;
+    }
+    return false;       // asociandose, reintentando o avisando
+}
+
+void red_esperar_orden(uint32_t ms) {
+    if (sock_comandos < 0) {                 // sin socket no hay orden que pueda llegar
+        vTaskDelay(pdMS_TO_TICKS(ms));
+        return;
+    }
+    fd_set lectura;
+    FD_ZERO(&lectura);
+    FD_SET(sock_comandos, &lectura);
+    struct timeval plazo = {
+        .tv_sec  = ms / 1000,
+        .tv_usec = (ms % 1000) * 1000,
+    };
+    // select() bloquea la tarea hasta que haya un datagrama para leer o
+    // venza el plazo. No consume el datagrama.
+    int listos = select(sock_comandos + 1, &lectura, NULL, NULL, &plazo);
+    if (listos == 0) return;                 // vencio el plazo
+    if (listos > 0) {
+        // Se confirma que lo que hay es un datagrama, mirandolo sin sacarlo
+        uint8_t primero;
+        if (recvfrom(sock_comandos, &primero, 1, MSG_PEEK | MSG_DONTWAIT, NULL, NULL) >= 0) return;
+    }
+    // select() fallo, o desperto por algo que no se puede leer (un error del
+    // socket). Se hace la pausa comun: sin ella el ciclo principal giraria
+    // sin descanso mientras la condicion dure.
+    vTaskDelay(pdMS_TO_TICKS(ms));
+}
+
+// ===========================================================================
 // API PUBLICA
 // ===========================================================================
 void red_set_comando_handler(red_comando_cb_t cb) { s_comando_cb = cb; }
@@ -676,6 +729,14 @@ void red_init(void) {
 
     wifi_init_config_t wifi_cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&wifi_cfg));
+
+    // Ahorro de energia de la radio. Asociada a un punto de acceso, la radio
+    // se apaga entre una baliza y la siguiente y se enciende para escuchar
+    // las que anuncian trafico pendiente (DTIM); el punto de acceso retiene
+    // mientras tanto lo que tenga para la pulsera. La asociacion no se
+    // pierde. Es el modo por defecto de ESP-IDF; se lo fija aca para que no
+    // dependa de ese valor por defecto.
+    ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_MIN_MODEM));
 
     ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID,
                                                 &wifi_event_handler, NULL));

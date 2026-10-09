@@ -249,12 +249,18 @@ void motor_pads_init(void) {
         .hpoint     = 0,
     };
     ESP_ERROR_CHECK(ledc_channel_config(&ch_cfg));
+    // Con el reposo automático, ESP-IDF desconecta los pines mientras el
+    // micro duerme. La línea del motor se exceptúa: tiene que seguir en
+    // nivel bajo, o el transistor quedaría con la compuerta al aire.
+    gpio_sleep_sel_dis(PIN_MOTOR);
 
     ESP_ERROR_CHECK(touch_pad_init());
     ESP_ERROR_CHECK(touch_pad_set_fsm_mode(TOUCH_FSM_MODE_TIMER));
     ESP_ERROR_CHECK(touch_pad_set_voltage(TOUCH_HVOLT_2V7, TOUCH_LVOLT_0V5, TOUCH_HVOLT_ATTEN_1V));
     for (int i = 0; i < 4; i++) {
         ESP_ERROR_CHECK(touch_pad_config(PAD_TOUCH_NUM[i]));
+        // El sensor táctil sigue midiendo durante el reposo del micro
+        gpio_sleep_sel_dis((gpio_num_t)PAD_TOUCH_NUM[i]);   // en el S3, canal táctil n = GPIO n
     }
     ESP_ERROR_CHECK(touch_pad_fsm_start());
 
@@ -265,6 +271,7 @@ void motor_pads_init(void) {
         .mode         = GPIO_MODE_OUTPUT,
     };
     ESP_ERROR_CHECK(gpio_config(&leds_pads_cfg));
+    gpio_sleep_sel_dis(PIN_LEDS_PADS);     // también conserva su nivel en reposo
     leds_pads_apagar();
     ESP_LOGI(TAG, "[leds_pads] nivel tras apagar = %d (esperado: 0, activa en alto)",
              gpio_get_level(PIN_LEDS_PADS));
@@ -284,6 +291,13 @@ void motor_pads_update(void) {
         // toque nuevo.
         pads_leer_flanco();
     }
+}
+
+// true cuando no hay nada en curso: ni vibración ni verificación. Mientras
+// sea false, el ciclo principal no deja que el microcontrolador entre en
+// reposo: el PWM del motor necesita el reloj, y los pads se leen cada 20 ms.
+bool motor_pads_en_reposo(void) {
+    return !motor_activo && des_estado == DES_INACTIVO;
 }
 
 void motor_pads_ejecutar_comando(int tipo, int intensidad,

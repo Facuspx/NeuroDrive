@@ -61,6 +61,24 @@ static const char *TAG = "BPM_MAX30102";
 #define MEDIAN_BUF_SIZE             16
 
 // ---------------------------------------------------------------------
+// Lectura por lotes
+//
+// El sensor muestrea por su cuenta y guarda hasta 32 muestras en su FIFO
+// (640 ms). La tarea no lo consulta de continuo: espera PERIODO_LECTURA_MS,
+// lee todo lo acumulado y vuelve a esperar. Entre una lectura y la siguiente
+// no hay trafico I2C ni uso del procesador, y el microcontrolador puede
+// entrar en reposo.
+// ---------------------------------------------------------------------
+#define PERIODO_LECTURA_MS          200
+#define PERIODO_MUESTRA_US          20000.0   // nominal: 100 muestras/s promediadas de a 2
+
+// Reloj de muestras (ver reloj_muestras_lote)
+#define RM_DESFASE_MAX_US           100000    // mas alla de esto se da por perdido el enganche
+#define RM_GANANCIA_FASE            16        // se corrige 1/16 del desfase por lote
+#define RM_VENTANA_CAL_US           30000000LL // cada cuanto se vuelve a medir el periodo
+#define RM_TOLERANCIA_PERIODO       0.05      // se acepta un periodo a +-5 % del nominal
+
+// ---------------------------------------------------------------------
 // Estado compartido con el getter público. Volatile alcanza: son
 // escrituras de una sola palabra desde un único task productor, y un
 // único consumidor (red_update, en otro task) que solo lee.
@@ -120,6 +138,70 @@ static float mediana(float *arr, int n) {
     return tmp[n/2];
 }
 
+// ---------------------------------------------------------------------
+// Reloj de muestras
+//
+// Al leer por lotes, la hora de cada muestra no puede tomarse del reloj del
+// microcontrolador en el momento de leerla: las diez de un lote tendrian
+// casi la misma. Lo que se conoce con exactitud es la separacion entre
+// muestras, que la fija el oscilador del sensor. Entonces a cada muestra se
+// le asigna la hora de la anterior mas un periodo.
+//
+// Ese periodo no es exactamente el nominal (el oscilador del sensor tiene
+// su tolerancia), y un error ahi pasaria entero a la frecuencia cardiaca.
+// Por eso se lo mide: se cuentan las muestras entregadas en una ventana
+// larga contra el reloj del microcontrolador. Ademas, en cada lote se
+// corrige una fraccion del desfase entre los dos relojes, para que no se
+// separen mientras la medicion converge.
+// ---------------------------------------------------------------------
+static int64_t  rm_t_us = 0;                         // hora asignada a la ultima muestra
+static double   rm_periodo_us = PERIODO_MUESTRA_US;  // periodo de muestra estimado
+static bool     rm_enganchado = false;
+static int64_t  rm_cal_t0_us = 0;                    // inicio de la ventana de medicion
+static uint32_t rm_cal_n = 0;                        // muestras contadas en la ventana
+
+static void reloj_muestras_reiniciar(void) {
+    rm_enganchado = false;
+    rm_periodo_us = PERIODO_MUESTRA_US;
+}
+
+// Se llama una vez por lote, antes de leerlo. ts_lectura_us es la hora del
+// microcontrolador y n la cantidad de muestras que se van a leer.
+static void reloj_muestras_lote(int64_t ts_lectura_us, int n) {
+    // La muestra mas nueva del lote tiene, en promedio, medio periodo de edad
+    int64_t objetivo  = ts_lectura_us - (int64_t)(rm_periodo_us / 2.0);
+    int64_t prevista  = rm_t_us + (int64_t)(rm_periodo_us * n);
+    int64_t desfase   = objetivo - prevista;
+
+    if (!rm_enganchado || desfase > RM_DESFASE_MAX_US || desfase < -RM_DESFASE_MAX_US) {
+        // Primer lote, o hubo un corte (reinicio del sensor, FIFO desbordado)
+        rm_t_us = objetivo - (int64_t)(rm_periodo_us * n);
+        rm_enganchado = true;
+        rm_cal_t0_us = ts_lectura_us;
+        rm_cal_n = 0;
+        return;
+    }
+    rm_t_us += desfase / RM_GANANCIA_FASE;
+
+    rm_cal_n += (uint32_t)n;
+    int64_t ventana = ts_lectura_us - rm_cal_t0_us;
+    if (ventana >= RM_VENTANA_CAL_US && rm_cal_n > 0) {
+        double medido = (double)ventana / (double)rm_cal_n;
+        if (medido > PERIODO_MUESTRA_US * (1.0 - RM_TOLERANCIA_PERIODO) &&
+            medido < PERIODO_MUESTRA_US * (1.0 + RM_TOLERANCIA_PERIODO)) {
+            rm_periodo_us = medido;
+        }
+        rm_cal_t0_us = ts_lectura_us;
+        rm_cal_n = 0;
+    }
+}
+
+// Hora de la muestra que se acaba de leer del FIFO
+static int64_t reloj_muestras_siguiente(void) {
+    rm_t_us += (int64_t)rm_periodo_us;
+    return rm_t_us;
+}
+
 static void max30102_init(void) {
     ESP_LOGI(TAG, "Inicializando MAX30102 (SDA:GP%d, SCL:GP%d)...",
              I2C_MASTER_SDA_IO, I2C_MASTER_SCL_IO);
@@ -131,16 +213,23 @@ static void max30102_init(void) {
     max30102_write_reg(REG_FIFO_CONFIG,  0x3F);
     max30102_write_reg(REG_MODE_CONFIG,  0x03);
     max30102_write_reg(REG_SPO2_CONFIG,  0x67);
-    // Validado en hardware real: 0xFF (51mA) causa brownouts en la ESP32-S3
-    // SuperMini. 0xBF (~38mA) es estable y suficiente para muñeca.
-    max30102_write_reg(REG_LED1_PA,      0xBF);
+    // Corriente de los emisores. Validado en hardware real: 0xFF (51mA) causa
+    // brownouts en la ESP32-S3 SuperMini. 0xBF (~38mA) es estable y suficiente
+    // para muñeca.
+    // El pulso se detecta con el segundo canal (LED2), que es el unico que
+    // lee el algoritmo. El primero (LED1) solo haria falta para estimar la
+    // saturacion de oxigeno, que este firmware no calcula: queda apagado y
+    // el sensor consume la mitad en emisores. El modo sigue siendo el de dos
+    // canales, de modo que el formato del FIFO no cambia.
+    max30102_write_reg(REG_LED1_PA,      0x00);
     max30102_write_reg(REG_LED2_PA,      0xBF);
     max30102_write_reg(REG_INTR_ENABLE_1, 0x40);
     max30102_write_reg(REG_INTR_ENABLE_2, 0x00);
     uint8_t dummy;
     max30102_read_reg(REG_INTR_STATUS_1, &dummy);
     max30102_read_reg(REG_INTR_STATUS_2, &dummy);
-    ESP_LOGI(TAG, "Sensor listo. SR=50Hz efectivos, ADC=16384nA, LED=~38mA");
+    reloj_muestras_reiniciar();   // FIFO vacio: las horas de las muestras arrancan de nuevo
+    ESP_LOGI(TAG, "Sensor listo. SR=50Hz efectivos, ADC=16384nA, LED2=~38mA, LED1 apagado");
 }
 
 // No toca el chip: deja el pedido y despierta a la task, que es la unica que habla con el sensor.
@@ -203,6 +292,10 @@ static void max30102_task(void *pv) {
         }
         // -----------------------------------------------------------------------------
 
+        // Espera el proximo lote. Un cambio de pedido (activar o apagar) corta
+        // la espera, y lo resuelve el bloque de arriba en la vuelta siguiente.
+        if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(PERIODO_LECTURA_MS)) > 0) continue;
+
         int n = max30102_samples_available();
         if (n < 0) {
             i2c_err_streak++;
@@ -217,141 +310,141 @@ static void max30102_task(void *pv) {
             continue;
         }
         i2c_err_streak = 0;
-        if (n == 0) { vTaskDelay(pdMS_TO_TICKS(5)); continue; }
+        if (n == 0) continue;
 
-        int64_t ts_now = esp_timer_get_time();
-        if (max30102_read_fifo(&red_raw, &ir_raw) != ESP_OK) {
-            vTaskDelay(pdMS_TO_TICKS(10));
-            continue;
-        }
+        reloj_muestras_lote(esp_timer_get_time(), n);
 
-        if (ir_raw == 262143) {
-            lockup_count++;
-            if (lockup_count >= 50) {
-                ESP_LOGE(TAG, "Bus bloqueado. Reiniciando sensor...");
-                max30102_init();
-                lockup_count = 0;
-                finger_present = false;
+        // Las n muestras del lote, de la mas vieja a la mas nueva. Dentro de
+        // este lazo, "continue" pasa a la muestra siguiente.
+        for (int k = 0; k < n; k++) {
+            if (max30102_read_fifo(&red_raw, &ir_raw) != ESP_OK) break;   // se reintenta en el lote siguiente
+            int64_t ts_now = reloj_muestras_siguiente();
+
+            if (ir_raw == 262143) {
+                lockup_count++;
+                if (lockup_count >= 50) {
+                    ESP_LOGE(TAG, "Bus bloqueado. Reiniciando sensor...");
+                    max30102_init();
+                    lockup_count = 0;
+                    finger_present = false;
+                    break;                            // el FIFO se vacio: este lote ya no existe
+                }
+                continue;
             }
-            vTaskDelay(pdMS_TO_TICKS(10));
-            continue;
-        }
-        lockup_count = 0;
+            lockup_count = 0;
 
-        double fir = (double)ir_raw;
+            double fir = (double)ir_raw;
 
-        if (!finger_present) {
-            if (fir >= FINGER_ON_UMBRAL) {
-                finger_present = true;
-                contacto_confirmado = false;
-                s_contacto_confirmado = false;
-                ts_primer_contacto_us = ts_now;
-                dc_ir = fir; warmup = 0; dc_ok = false;
-                ma_idx = 0; ma_sum = 0.0; ma_count = 0;
-                memset(ma_buf, 0, sizeof(ma_buf));
-                det_buf[0]=det_buf[1]=det_buf[2]=0.0;
-                ts_buf[0]=ts_buf[1]=ts_buf[2]=0;
-                peak_env = 0.0; last_beat_us = 0;
-                bpm_ema = 0.0f; bpm_med_val = 0.0f;
-                beat_count = 0; med_idx = 0; med_count = 0; log_tick = 0;
-                memset(med_buf, 0, sizeof(med_buf));
-                ESP_LOGI(TAG, "CONTACTO DETECTADO — Calibrando (~3s)...");
+            if (!finger_present) {
+                if (fir >= FINGER_ON_UMBRAL) {
+                    finger_present = true;
+                    contacto_confirmado = false;
+                    s_contacto_confirmado = false;
+                    ts_primer_contacto_us = ts_now;
+                    dc_ir = fir; warmup = 0; dc_ok = false;
+                    ma_idx = 0; ma_sum = 0.0; ma_count = 0;
+                    memset(ma_buf, 0, sizeof(ma_buf));
+                    det_buf[0]=det_buf[1]=det_buf[2]=0.0;
+                    ts_buf[0]=ts_buf[1]=ts_buf[2]=0;
+                    peak_env = 0.0; last_beat_us = 0;
+                    bpm_ema = 0.0f; bpm_med_val = 0.0f;
+                    beat_count = 0; med_idx = 0; med_count = 0; log_tick = 0;
+                    memset(med_buf, 0, sizeof(med_buf));
+                    ESP_LOGI(TAG, "CONTACTO DETECTADO — Calibrando (~3s)...");
+                } else {
+                    continue;
+                }
             } else {
-                vTaskDelay(pdMS_TO_TICKS(20));
-                continue;
-            }
-        } else {
-            if (fir < FINGER_OFF_UMBRAL) {
-                finger_present = false;
-                contacto_confirmado = false;
-                s_contacto_confirmado = false;
-                ESP_LOGW(TAG, "Retirado. EMA:%.1f MED:%.1f", bpm_ema, bpm_med_val);
-                vTaskDelay(pdMS_TO_TICKS(20));
-                continue;
-            }
-            if (!contacto_confirmado &&
-                (ts_now - ts_primer_contacto_us) >= (int64_t)CONTACT_CONFIRM_TIMEOUT_US) {
-                ESP_LOGW(TAG, "Sin pulso fisiologico tras %llus — probable superficie. Reiniciando.",
-                         (unsigned long long)(CONTACT_CONFIRM_TIMEOUT_US / 1000000ULL));
-                finger_present = false;
-                vTaskDelay(pdMS_TO_TICKS(20));
-                continue;
-            }
-        }
-
-        dc_ir = dc_ir * DC_ALPHA + fir * (1.0 - DC_ALPHA);
-        if (!dc_ok) {
-            if (++warmup >= DC_WARMUP_SAMPLES) {
-                dc_ok = true;
-                ESP_LOGI(TAG, "DC OK. IR_DC=%.0f — detectando latidos...", dc_ir);
-            }
-            ts_buf[0]=ts_buf[1]; ts_buf[1]=ts_buf[2]; ts_buf[2]=ts_now;
-            continue;
-        }
-
-        double ir_ac = fir - dc_ir;
-        ma_sum -= ma_buf[ma_idx]; ma_buf[ma_idx] = ir_ac; ma_sum += ir_ac;
-        ma_idx = (ma_idx + 1) % MA_SIZE;
-        if (ma_count < MA_SIZE) ma_count++;
-        double ir_smooth = ma_sum / (double)ma_count;
-
-        double abs_s = (ir_smooth > 0.0) ? ir_smooth : -ir_smooth;
-        if (abs_s > ARTIFACT_CEILING) peak_env *= 0.95;
-        else if (abs_s > peak_env) peak_env = abs_s;
-        else peak_env *= PEAK_DECAY;
-
-        double threshold = peak_env * THRESHOLD_RATIO;
-        if (threshold < THRESHOLD_MIN_ABS) threshold = THRESHOLD_MIN_ABS;
-
-        det_buf[0]=det_buf[1]; det_buf[1]=det_buf[2]; det_buf[2]=ir_smooth;
-        ts_buf[0]=ts_buf[1]; ts_buf[1]=ts_buf[2]; ts_buf[2]=ts_now;
-
-        double y0=det_buf[0], y1=det_buf[1], y2=det_buf[2];
-        bool es_pico = (y1 > y0) && (y1 > y2);
-        bool supera_umbral = (y1 >= threshold);
-        bool fuera_refract = (last_beat_us == 0) ||
-                              ((ts_buf[1]-last_beat_us) >= (int64_t)REFRACTORY_US);
-
-        if (es_pico && supera_umbral && fuera_refract) {
-            int64_t beat_time_us;
-            double denom = y0 - 2.0*y1 + y2;
-            if (fabs(denom) > 1e-9) {
-                double delta = 0.5 * (y0 - y2) / denom;
-                double dt = (double)(ts_buf[2]-ts_buf[0]) / 2.0;
-                beat_time_us = ts_buf[1] + (int64_t)(delta * dt);
-            } else beat_time_us = ts_buf[1];
-
-            if (last_beat_us > 0) {
-                int64_t intervalo_us = beat_time_us - last_beat_us;
-                float bpm_inst = 60000000.0f / (float)intervalo_us;
-                if (bpm_inst >= MIN_BPM && bpm_inst <= MAX_BPM) {
-                    beat_count++;
-                    med_buf[med_idx % MEDIAN_BUF_SIZE] = bpm_inst;
-                    med_idx++;
-                    if (med_count < MEDIAN_BUF_SIZE) med_count++;
-                    float alpha = (beat_count <= BEATS_FOR_STEADY) ? BPM_ALPHA_BOOT : BPM_ALPHA_STEADY;
-                    bpm_ema = (bpm_ema == 0.0f) ? bpm_inst : bpm_ema*(1.0f-alpha)+bpm_inst*alpha;
-                    bpm_med_val = mediana(med_buf, med_count);
-
-                    if (beat_count >= BEATS_FOR_STEADY) {
-                        contacto_confirmado = true;
-                        s_bpm_med_val = bpm_med_val;
-                        s_contacto_confirmado = true;
-                        ESP_LOGI(TAG, "MED:%5.1f EMA:%5.1f inst:%5.1f beat:%d",
-                                 bpm_med_val, bpm_ema, bpm_inst, beat_count);
-                    } else {
-                        ESP_LOGI(TAG, "Cal %d/%d inst:%.1f", beat_count, BEATS_FOR_STEADY, bpm_inst);
-                    }
+                if (fir < FINGER_OFF_UMBRAL) {
+                    finger_present = false;
+                    contacto_confirmado = false;
+                    s_contacto_confirmado = false;
+                    ESP_LOGW(TAG, "Retirado. EMA:%.1f MED:%.1f", bpm_ema, bpm_med_val);
+                    continue;
+                }
+                if (!contacto_confirmado &&
+                    (ts_now - ts_primer_contacto_us) >= (int64_t)CONTACT_CONFIRM_TIMEOUT_US) {
+                    ESP_LOGW(TAG, "Sin pulso fisiologico tras %llus — probable superficie. Reiniciando.",
+                             (unsigned long long)(CONTACT_CONFIRM_TIMEOUT_US / 1000000ULL));
+                    finger_present = false;
+                    continue;
                 }
             }
-            last_beat_us = beat_time_us;
-        }
 
-        if (++log_tick >= 250) {
-            log_tick = 0;
-            ESP_LOGI(TAG, ">> IR:%lu DC:%.0f EMA:%.1f MED:%.1f beats:%d",
-                     (unsigned long)ir_raw, dc_ir, bpm_ema, bpm_med_val, beat_count);
-        }
+            dc_ir = dc_ir * DC_ALPHA + fir * (1.0 - DC_ALPHA);
+            if (!dc_ok) {
+                if (++warmup >= DC_WARMUP_SAMPLES) {
+                    dc_ok = true;
+                    ESP_LOGI(TAG, "DC OK. IR_DC=%.0f — detectando latidos...", dc_ir);
+                }
+                ts_buf[0]=ts_buf[1]; ts_buf[1]=ts_buf[2]; ts_buf[2]=ts_now;
+                continue;
+            }
+
+            double ir_ac = fir - dc_ir;
+            ma_sum -= ma_buf[ma_idx]; ma_buf[ma_idx] = ir_ac; ma_sum += ir_ac;
+            ma_idx = (ma_idx + 1) % MA_SIZE;
+            if (ma_count < MA_SIZE) ma_count++;
+            double ir_smooth = ma_sum / (double)ma_count;
+
+            double abs_s = (ir_smooth > 0.0) ? ir_smooth : -ir_smooth;
+            if (abs_s > ARTIFACT_CEILING) peak_env *= 0.95;
+            else if (abs_s > peak_env) peak_env = abs_s;
+            else peak_env *= PEAK_DECAY;
+
+            double threshold = peak_env * THRESHOLD_RATIO;
+            if (threshold < THRESHOLD_MIN_ABS) threshold = THRESHOLD_MIN_ABS;
+
+            det_buf[0]=det_buf[1]; det_buf[1]=det_buf[2]; det_buf[2]=ir_smooth;
+            ts_buf[0]=ts_buf[1]; ts_buf[1]=ts_buf[2]; ts_buf[2]=ts_now;
+
+            double y0=det_buf[0], y1=det_buf[1], y2=det_buf[2];
+            bool es_pico = (y1 > y0) && (y1 > y2);
+            bool supera_umbral = (y1 >= threshold);
+            bool fuera_refract = (last_beat_us == 0) ||
+                                  ((ts_buf[1]-last_beat_us) >= (int64_t)REFRACTORY_US);
+
+            if (es_pico && supera_umbral && fuera_refract) {
+                int64_t beat_time_us;
+                double denom = y0 - 2.0*y1 + y2;
+                if (fabs(denom) > 1e-9) {
+                    double delta = 0.5 * (y0 - y2) / denom;
+                    double dt = (double)(ts_buf[2]-ts_buf[0]) / 2.0;
+                    beat_time_us = ts_buf[1] + (int64_t)(delta * dt);
+                } else beat_time_us = ts_buf[1];
+
+                if (last_beat_us > 0) {
+                    int64_t intervalo_us = beat_time_us - last_beat_us;
+                    float bpm_inst = 60000000.0f / (float)intervalo_us;
+                    if (bpm_inst >= MIN_BPM && bpm_inst <= MAX_BPM) {
+                        beat_count++;
+                        med_buf[med_idx % MEDIAN_BUF_SIZE] = bpm_inst;
+                        med_idx++;
+                        if (med_count < MEDIAN_BUF_SIZE) med_count++;
+                        float alpha = (beat_count <= BEATS_FOR_STEADY) ? BPM_ALPHA_BOOT : BPM_ALPHA_STEADY;
+                        bpm_ema = (bpm_ema == 0.0f) ? bpm_inst : bpm_ema*(1.0f-alpha)+bpm_inst*alpha;
+                        bpm_med_val = mediana(med_buf, med_count);
+
+                        if (beat_count >= BEATS_FOR_STEADY) {
+                            contacto_confirmado = true;
+                            s_bpm_med_val = bpm_med_val;
+                            s_contacto_confirmado = true;
+                            ESP_LOGI(TAG, "MED:%5.1f EMA:%5.1f inst:%5.1f beat:%d",
+                                     bpm_med_val, bpm_ema, bpm_inst, beat_count);
+                        } else {
+                            ESP_LOGI(TAG, "Cal %d/%d inst:%.1f", beat_count, BEATS_FOR_STEADY, bpm_inst);
+                        }
+                    }
+                }
+                last_beat_us = beat_time_us;
+            }
+
+            if (++log_tick >= 250) {
+                log_tick = 0;
+                ESP_LOGI(TAG, ">> IR:%lu DC:%.0f EMA:%.1f MED:%.1f beats:%d",
+                         (unsigned long)ir_raw, dc_ir, bpm_ema, bpm_med_val, beat_count);
+            }
+        }   // fin del lote
     }
 }
 
@@ -396,6 +489,11 @@ void bpm_max30102_init(void) {
     ESP_ERROR_CHECK(i2c_driver_install(I2C_MASTER_NUM, conf.mode,
                                        I2C_MASTER_RX_BUF_DISABLE,
                                        I2C_MASTER_TX_BUF_DISABLE, 0));
+    // Con el reposo automatico, ESP-IDF desconecta los pines mientras el
+    // micro duerme. Las dos lineas del bus se exceptuan: tienen que conservar
+    // sus resistencias a positivo, o el sensor veria transiciones falsas.
+    gpio_sleep_sel_dis(I2C_MASTER_SDA_IO);
+    gpio_sleep_sel_dis(I2C_MASTER_SCL_IO);
     // Arranca APAGADO: no se configura para medir. Despierta cuando haya AP (set_activo(true)).
     if (max30102_apagar() != ESP_OK)
         ESP_LOGW(TAG, "MAX30102 no respondio al SHDN inicial (se reintenta desde la task)");

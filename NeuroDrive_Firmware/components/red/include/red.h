@@ -31,6 +31,18 @@ void red_update(void);    // llamar en cada vuelta del ciclo principal; no bloqu
 // true mientras la pulsera esta asociada a la red de la Pi
 bool red_operando_con_pi(void);
 
+// true cuando la conectividad esta estable y no queda nada por enviar: operando
+// con la Pi, o en modo testigo entre dos revisiones. Mientras sea false (se
+// esta asociando, reintentando o avisando) el ciclo principal no deja que el
+// microcontrolador entre en reposo.
+bool red_en_reposo(void);
+
+// Espera hasta `ms` milisegundos, y vuelve antes si llega una orden. Es la
+// pausa del ciclo principal cuando todo esta en reposo: el microcontrolador
+// duerme mientras tanto y una orden lo despierta en el acto. No lee la
+// orden; eso lo hace red_update() en la vuelta siguiente.
+void red_esperar_orden(uint32_t ms);
+
 // Respuesta del conductor a una verificacion. La transmite ACK_REENVIOS veces
 // con el mismo id_secuencia: la primera copia sale en el acto y las demas
 // desde red_update(), sin detener el ciclo principal.

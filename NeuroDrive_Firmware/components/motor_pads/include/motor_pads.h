@@ -8,6 +8,9 @@
 void motor_pads_init(void);
 void motor_pads_update(void);   // llamar en cada vuelta del ciclo principal; no bloquea
 
+// true cuando no hay vibracion ni verificacion en curso
+bool motor_pads_en_reposo(void);
+
 // Ejecuta una orden recibida de la Pi. Se registra con red_set_comando_handler().
 // En la orden de verificacion (tipo 8), duracion_ms es la ventana de respuesta.
 void motor_pads_ejecutar_comando(int tipo, int intensidad,

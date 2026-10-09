@@ -2,6 +2,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "driver/rmt_tx.h"
+#include "driver/gpio.h"
 #include "esp_adc/adc_oneshot.h"
 #include "esp_adc/adc_cali.h"
 #include "esp_adc/adc_cali_scheme.h"
@@ -28,13 +29,39 @@ static const char *TAG = "BATERIA_LED";
 #define BAT_PERIODO_MS      5000
 
 // -----------------------------------------------------------------------
+// Destello de los indicadores
+//
+// Los indicadores no quedan encendidos: destellan LED_DESTELLO_MS cada
+// LED_PERIODO_MS (10 % del tiempo, que es la proporción con la que se
+// dimensionó la batería). Con la batería por debajo del 10 % su indicador
+// destella más seguido. Para dejarlos fijos, igualar LED_PERIODO_MS a
+// LED_DESTELLO_MS.
+// -----------------------------------------------------------------------
+#define LED_DESTELLO_MS          200
+#define LED_PERIODO_MS          2000
+#define LED_PERIODO_CRITICO_MS   500
+
+// -----------------------------------------------------------------------
 // WS2812/SK6812 sobre RMT — timing estándar (resolución 10MHz = 100ns/tick)
 //   bit 0: 300ns alto, 900ns bajo
 //   bit 1: 600ns alto, 600ns bajo
 // El reset (>80us bajo) queda satisfecho solo: entre una actualización y
 // la siguiente pasan milisegundos, mucho más que el mínimo requerido.
+//
+// El LED conserva por sí mismo el último color recibido. Por eso solo se le
+// transmite cuando el color cambia, y el canal RMT se habilita únicamente
+// durante esa transmisión: habilitado, el controlador retiene un bloqueo de
+// energía que impediría el reposo del microcontrolador.
 // -----------------------------------------------------------------------
-static rmt_channel_handle_t chan_conec = NULL, chan_bateria = NULL;
+typedef struct {
+    rmt_channel_handle_t chan;
+    uint8_t r, g, b;        // último color transmitido
+    bool    transmitido;    // false: todavía no se envió nada, o el último envío falló
+    bool    encendido;      // fase del destello
+    int64_t ts_cambio_ms;   // instante del próximo cambio de fase
+} indicador_t;
+
+static indicador_t ind_conec, ind_bateria;
 static rmt_encoder_handle_t enc_bytes  = NULL;
 
 static rmt_channel_handle_t crear_canal_ws2812(int pin) {
@@ -47,12 +74,17 @@ static rmt_channel_handle_t crear_canal_ws2812(int pin) {
         .trans_queue_depth = 4,
     };
     ESP_ERROR_CHECK(rmt_new_tx_channel(&cfg, &chan));
-    ESP_ERROR_CHECK(rmt_enable(chan));
+    // El canal queda creado pero sin habilitar: lo habilita ws2812_set()
+    // durante cada transmisión. La línea de datos se exceptúa de la
+    // desconexión de pines en reposo: tiene que seguir en nivel bajo, o el
+    // LED interpretaría el ruido como datos.
+    gpio_sleep_sel_dis(pin);
     return chan;
 }
 
-static void ws2812_set(rmt_channel_handle_t chan, uint8_t r, uint8_t g, uint8_t b) {
-    if (!chan || !enc_bytes) return;
+static void ws2812_set(indicador_t *ind, uint8_t r, uint8_t g, uint8_t b) {
+    if (!ind->chan || !enc_bytes) return;
+    if (ind->transmitido && ind->r == r && ind->g == g && ind->b == b) return;   // ya lo muestra
 
     // static: el transmisor lee este buffer mientras envía; no puede estar en
     // la pila de una función que podría haber retornado. Orden GRB.
@@ -61,9 +93,32 @@ static void ws2812_set(rmt_channel_handle_t chan, uint8_t r, uint8_t g, uint8_t 
     pixel[1] = r;
     pixel[2] = b;
 
+    if (rmt_enable(ind->chan) != ESP_OK) { ind->transmitido = false; return; }
     rmt_transmit_config_t tx_cfg = { .loop_count = 0 };
-    rmt_transmit(chan, enc_bytes, pixel, sizeof(pixel), &tx_cfg);
-    rmt_tx_wait_all_done(chan, pdMS_TO_TICKS(20));
+    esp_err_t err = rmt_transmit(ind->chan, enc_bytes, pixel, sizeof(pixel), &tx_cfg);
+    if (err == ESP_OK) err = rmt_tx_wait_all_done(ind->chan, pdMS_TO_TICKS(20));
+    rmt_disable(ind->chan);
+
+    // Si el envío falló no se anota el color: se reintenta en la vuelta siguiente
+    ind->transmitido = (err == ESP_OK);
+    ind->r = r; ind->g = g; ind->b = b;
+}
+
+// Avanza la fase del destello de un indicador. Devuelve true si le toca
+// estar encendido.
+static bool destello_update(indicador_t *ind, int periodo_ms) {
+    int64_t ahora = millis();
+    if ((ahora - ind->ts_cambio_ms) >= 0) {
+        int apagado_ms = periodo_ms - LED_DESTELLO_MS;
+        if (ind->encendido && apagado_ms > 0) {
+            ind->encendido = false;
+            ind->ts_cambio_ms = ahora + apagado_ms;
+        } else {
+            ind->encendido = true;
+            ind->ts_cambio_ms = ahora + LED_DESTELLO_MS;
+        }
+    }
+    return ind->encendido;
 }
 
 // -----------------------------------------------------------------------
@@ -126,7 +181,7 @@ static const curva_punto_t CURVA_BATERIA[] = {
     { 3.50f,   5 },
     { 3.30f,   0 },
 };
-#define N_CURVA_BATERIA (sizeof(CURVA_BATERIA) / sizeof(CURVA_BATERIA[0]))
+#define N_CURVA_BATERIA ((int)(sizeof(CURVA_BATERIA) / sizeof(CURVA_BATERIA[0])))
 
 static int bateria_v_a_pct(float v) {
     if (v >= CURVA_BATERIA[0].v) return 100;
@@ -149,28 +204,34 @@ static int bateria_v_a_pct(float v) {
 // Colores de los indicadores
 // -----------------------------------------------------------------------
 static void led_bateria_mostrar(int pct) {
-    uint8_t r = 0, g = 0, b = 0;
-    if (pct > 60) {
-        g = 30;
-    } else if (pct > 30) {
-        r = 35; g = 25;
-    } else if (pct >= 10) {
-        r = 40;
-    } else {
-        bool on = (millis() / 400) % 2;
-        r = on ? 45 : 0;
+    bool critica = (pct < 10);
+    if (!destello_update(&ind_bateria, critica ? LED_PERIODO_CRITICO_MS : LED_PERIODO_MS)) {
+        ws2812_set(&ind_bateria, 0, 0, 0);
+        return;
     }
-    ws2812_set(chan_bateria, r, g, b);
+    if (pct > 60) {
+        ws2812_set(&ind_bateria, 0, 30, 0);        // verde
+    } else if (pct > 30) {
+        ws2812_set(&ind_bateria, 35, 25, 0);       // amarillo
+    } else if (!critica) {
+        ws2812_set(&ind_bateria, 40, 0, 0);        // rojo
+    } else {
+        ws2812_set(&ind_bateria, 45, 0, 0);        // rojo, destello rápido
+    }
 }
 
 static void led_conec_mostrar(void) {
+    if (!destello_update(&ind_conec, LED_PERIODO_MS)) {
+        ws2812_set(&ind_conec, 0, 0, 0);
+        return;
+    }
     red_estado_conec_t conec = red_obtener_estado_conec();
     if (conec == RED_OPERANDO_PI) {
-        ws2812_set(chan_conec, 0, 30, 0);          // verde
+        ws2812_set(&ind_conec, 0, 30, 0);          // verde
     } else if (conec == RED_MODO_TESTIGO) {
-        ws2812_set(chan_conec, 25, 0, 35);         // violeta
+        ws2812_set(&ind_conec, 25, 0, 35);         // violeta
     } else {
-        ws2812_set(chan_conec, 25, 12, 0);         // ámbar (conectando/camión)
+        ws2812_set(&ind_conec, 25, 12, 0);         // ámbar (conectando/camión)
     }
 }
 
@@ -185,8 +246,8 @@ void bateria_led_init(void) {
     };
     ESP_ERROR_CHECK(rmt_new_bytes_encoder(&enc_cfg, &enc_bytes));
 
-    chan_conec   = crear_canal_ws2812(PIN_LED_CONEC);
-    chan_bateria = crear_canal_ws2812(PIN_LED_BATERIA);
+    ind_conec.chan   = crear_canal_ws2812(PIN_LED_CONEC);
+    ind_bateria.chan = crear_canal_ws2812(PIN_LED_BATERIA);
 
     adc_oneshot_unit_init_cfg_t adc_cfg = { .unit_id = ADC_UNIT_1 };
     ESP_ERROR_CHECK(adc_oneshot_new_unit(&adc_cfg, &adc_handle));
@@ -214,15 +275,12 @@ void bateria_led_init(void) {
     }
 
     // Apagados hasta la primera lectura/estado real
-    ws2812_set(chan_conec, 0, 0, 0);
-    ws2812_set(chan_bateria, 0, 0, 0);
+    ws2812_set(&ind_conec, 0, 0, 0);
+    ws2812_set(&ind_bateria, 0, 0, 0);
 
     ESP_LOGI(TAG, "Bateria+LEDs listos (ADC GP%d, LED conec GP%d, LED bateria GP%d)",
              PIN_BATERIA_ADC, PIN_LED_CONEC, PIN_LED_BATERIA);
 }
-
-// Próximo refresco de los indicadores
-static int64_t led_ts_prox = 0;
 
 void bateria_led_update(void) {
     if ((millis() - bat_ts_prox) >= 0) {
@@ -231,12 +289,21 @@ void bateria_led_update(void) {
         bateria_pct = bateria_v_a_pct(bateria_voltaje);
     }
 
-    // Los indicadores se refrescan cada 50 ms, no en cada vuelta del ciclo
-    if ((millis() - led_ts_prox) >= 0) {
-        led_ts_prox = millis() + 50;
-        led_bateria_mostrar(bateria_pct);
-        led_conec_mostrar();
-    }
+    // Solo se transmite a un indicador cuando su color cambia (ver ws2812_set)
+    led_bateria_mostrar(bateria_pct);
+    led_conec_mostrar();
+}
+
+// Cuánto falta para que algún indicador tenga que encenderse o apagarse. El
+// ciclo principal lo usa para no dormir de más y que el destello dure lo
+// que tiene que durar.
+uint32_t bateria_led_ms_hasta_cambio(void) {
+    int64_t ahora = millis();
+    int64_t falta = ind_conec.ts_cambio_ms - ahora;
+    int64_t falta_bat = ind_bateria.ts_cambio_ms - ahora;
+    if (falta_bat < falta) falta = falta_bat;
+    if (falta < 0) falta = 0;
+    return (uint32_t)falta;
 }
 
 int bateria_led_get_pct(void) { return bateria_pct; }

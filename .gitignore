@@ -39,9 +39,8 @@ tree.txt
 config/ap.env
 NeuroDrive_Firmware/components/red/credenciales.h
 
-# Compilacion del firmware y del banco de pruebas
+# Compilacion del firmware
 NeuroDrive_Firmware/build/
-NeuroDrive_Firmware/banco/build/
 NeuroDrive_Firmware/sdkconfig.old
 NeuroDrive_Firmware/managed_components/
 NeuroDrive_Firmware/dependencies.lock

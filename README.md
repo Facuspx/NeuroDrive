@@ -94,8 +94,9 @@ NeuroDrive/
 ├── integracion/               pruebas entre programas
 ├── herramientas/              bancos de prueba que no usan el núcleo
 └── NeuroDrive_Firmware/       firmware de la pulsera (proyecto ESP-IDF 5.2)
-    ├── main/  components/     red, motor y pads, pulso, batería e indicadores
-    └── banco/                 banco de pruebas del firmware en PC
+    ├── main/                  programa principal y gestión de energía
+    ├── components/            red, motor y pads, pulso, batería e indicadores
+    └── sdkconfig              configuración del proyecto
 ```
 
 ## Requisitos
@@ -226,18 +227,44 @@ python -m NeuroDrive_Vision.test_captura_archivo
 python -m integracion.test_ipc_vision_core
 ```
 
-## Banco de pruebas del firmware
+## Firmware de la pulsera
 
-`red.c` y `motor_pads.c` se compilan sin modificar para la PC, con el Wi-Fi, el
-motor, los pads y el reloj reemplazados por funciones que maneja el test. Del
-otro lado van el actuador y el receptor reales de la Raspberry, por UDP sobre
-localhost. Verifica la máquina de conectividad, el descarte de repetidas, la
-ventana de respuesta, la respuesta triple y el aviso remoto, sin la pulsera.
+Proyecto ESP-IDF 5.2 para el ESP32-S3. Antes de compilar hay que crear
+`components/red/credenciales.h` (ver Claves).
 
 ```bash
-sudo apt install libcjson-dev          # una sola vez
-./NeuroDrive_Firmware/banco/correr.sh  # 23 casos; no correr junto con main.py
+cd NeuroDrive_Firmware
+idf.py build
+idf.py -p <puerto> flash monitor
 ```
+
+**Indicadores.** Los dos destellan 200 ms cada 2 s; no quedan encendidos.
+
+| Indicador | Color | Significado |
+|---|---|---|
+| Conectividad | Verde | Operando con la Raspberry |
+| Conectividad | Ámbar | Buscando a la Raspberry, o pasando a la red de respaldo |
+| Conectividad | Violeta | Modo testigo: en la red de respaldo |
+| Batería | Verde / amarillo / rojo | Más del 60 %, más del 30 %, 10 % o más |
+| Batería | Rojo, cada 0,5 s | Menos del 10 % |
+
+**Consumo.** Cuando no hay vibración ni verificación en curso y la
+conectividad está estable, el microcontrolador entra en reposo ligero y
+conserva la asociación Wi-Fi; una orden de la Raspberry lo despierta. El
+comportamiento se elige con `ENERGIA_NIVEL` en `main/main.c`:
+
+| Nivel | En reposo |
+|---|---|
+| 0 | Sin gestión de energía: procesador siempre encendido |
+| 1 | El procesador baja su frecuencia; no se detiene |
+| 2 | Reposo ligero (valor por defecto) |
+
+Los niveles 1 y 2 dependen de tres opciones de `sdkconfig`, que ya vienen
+activadas: `CONFIG_PM_ENABLE`, `CONFIG_FREERTOS_USE_TICKLESS_IDLE` y
+`CONFIG_USJ_NO_AUTO_LS_ON_CONNECTION`. Por la última, con el cable USB
+conectado a una computadora la pulsera no entra en reposo ligero y el monitor
+serie funciona con normalidad. El consumo se mide alimentándola desde la
+batería.
 
 ## Ensayo sin la pulsera
 
