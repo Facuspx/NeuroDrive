@@ -16,9 +16,14 @@ Estrategia de captura:
       problemas de padding a resoluciones no-estandar.
     - Escalado por software a 640x480 para MediaPipe.
     - ~14 FPS reales en Pi 5 (suficiente para deteccion facial).
+    - Zoom digital opcional (constante ZOOM): antes de escalar se recorta
+      una ventana del cuadro completo. Como la captura tiene 1640 pixeles de
+      ancho y el analisis usa 640, hasta un zoom de 2,56 la ventana recortada
+      sigue teniendo mas pixeles que el cuadro final: el rostro gana detalle
+      real y no se interpola nada.
 
 Pipeline:
-    rpicam-vid --codec mjpeg -o - | [stdout] -> cv2.imdecode -> resize
+    rpicam-vid --codec mjpeg -o - | [stdout] -> cv2.imdecode -> recorte -> resize
 
 API:
     cap = CapturaVideo(config)
@@ -74,6 +79,22 @@ class CapturaVideo:
     CAPTURA_ANCHO = 1640
     CAPTURA_ALTO = 1232
 
+    # ---- Zoom digital ----
+    # 1.0 = sin zoom (cuadro completo, comportamiento original).
+    # 1.5 = se usa la ventana central de 1/1.5 del ancho y del alto: el rostro
+    #       ocupa un 50 % mas en el cuadro que recibe MediaPipe.
+    # Valores utiles: 1.0 a 2.5. Por encima de CAPTURA_ANCHO / ancho objetivo
+    # (1640 / 640 = 2,56) la ventana tiene menos pixeles que el cuadro final y
+    # habria que agrandarla: se pierde nitidez en lugar de ganarla.
+    ZOOM = 2
+
+    # Centro de la ventana, como fraccion del cuadro YA volteado (lo que se ve
+    # en pantalla): 0.5, 0.5 = centro. Para subir la ventana, bajar
+    # ZOOM_CENTRO_Y (0.4); para correrla a la derecha, subir ZOOM_CENTRO_X.
+    # Si la ventana se saldria del cuadro, se la corre hacia adentro.
+    ZOOM_CENTRO_X = 0.4
+    ZOOM_CENTRO_Y = 0.5
+
     # Flip horizontal: la camara apunta al conductor, sin flip la imagen
     # sale espejada (mover la cabeza a la derecha -> se ve a la izquierda).
     HFLIP = True
@@ -99,6 +120,26 @@ class CapturaVideo:
         self.ancho_objetivo = config.vision.resolucion_ancho
         self.alto_objetivo = config.vision.resolucion_alto
         self.fps = config.vision.fps_deseado
+
+        # Zoom digital: se valida una vez. Un valor invalido no impide
+        # capturar: se informa y se sigue sin zoom.
+        self.zoom = float(self.ZOOM)
+        if not (1.0 <= self.zoom <= 8.0):
+            _log.warning("ZOOM=%s fuera de rango (1.0 a 8.0): se captura sin zoom",
+                         self.ZOOM)
+            self.zoom = 1.0
+        self._zoom_cx = min(1.0, max(0.0, float(self.ZOOM_CENTRO_X)))
+        self._zoom_cy = min(1.0, max(0.0, float(self.ZOOM_CENTRO_Y)))
+        zoom_sin_perdida = self.CAPTURA_ANCHO / float(self.ancho_objetivo)
+        if self.zoom > zoom_sin_perdida:
+            _log.warning(
+                "ZOOM=%.2f supera %.2f: la ventana recortada tiene menos "
+                "pixeles que el cuadro de %dx%d y se la agranda (menos nitidez)",
+                self.zoom, zoom_sin_perdida, self.ancho_objetivo, self.alto_objetivo,
+            )
+        # Ventana de recorte (x0, y0, ancho, alto). Se calcula con el primer
+        # cuadro, cuando se conoce su tamano real.
+        self._ventana_zoom: Optional[Tuple[int, int, int, int]] = None
 
         # Estado runtime
         self._proceso: Optional[subprocess.Popen] = None
@@ -297,11 +338,13 @@ class CapturaVideo:
         self.frames_capturados = 0
         self.frames_fallidos = 0
 
+        self._ventana_zoom = None      # se recalcula con el primer cuadro
+
         _log.info(
-            "Captura iniciada: %dx%d (nativo) -> %dx%d (objetivo) @ %d FPS",
+            "Captura iniciada: %dx%d (nativo) -> %dx%d (objetivo) @ %d FPS, zoom %.2f",
             self.CAPTURA_ANCHO, self.CAPTURA_ALTO,
             self.ancho_objetivo, self.alto_objetivo,
-            self.fps,
+            self.fps, self.zoom,
         )
 
     def detener(self) -> None:
@@ -355,15 +398,23 @@ class CapturaVideo:
             self.frames_fallidos += 1
             return None, ts
 
+        # Zoom digital: recortar la ventana antes de escalar
+        if self.zoom > 1.0:
+            frame_full = self._recortar_zoom(frame_full)
+
         # Escalar a resolucion objetivo
         if (
             frame_full.shape[1] != self.ancho_objetivo
             or frame_full.shape[0] != self.alto_objetivo
         ):
+            # INTER_AREA es el filtro correcto para reducir. Si la ventana
+            # quedo mas chica que el objetivo (zoom excesivo) hay que
+            # agrandar, y para eso corresponde INTER_LINEAR.
+            reduce = frame_full.shape[1] >= self.ancho_objetivo
             frame_bgr = cv2.resize(
                 frame_full,
                 (self.ancho_objetivo, self.alto_objetivo),
-                interpolation=cv2.INTER_AREA,
+                interpolation=cv2.INTER_AREA if reduce else cv2.INTER_LINEAR,
             )
         else:
             frame_bgr = frame_full
@@ -371,6 +422,36 @@ class CapturaVideo:
         self.frames_capturados += 1
         self._ts_ultimo_frame = ts
         return frame_bgr, ts
+
+    def _calcular_ventana_zoom(self, ancho: int, alto: int) -> Tuple[int, int, int, int]:
+        """
+        Ventana de recorte (x0, y0, ancho, alto) para un cuadro de ancho x alto.
+
+        Tiene la misma proporcion que el cuadro, de modo que el escalado
+        posterior no deforma la imagen (una deformacion alteraria el EAR y el
+        MAR, que son cocientes entre distancias verticales y horizontales).
+        Si el centro pedido la sacaria del cuadro, se la corre hacia adentro.
+        """
+        v_ancho = max(2, int(round(ancho / self.zoom)))
+        v_alto = max(2, int(round(alto / self.zoom)))
+        x0 = int(round(self._zoom_cx * ancho - v_ancho / 2.0))
+        y0 = int(round(self._zoom_cy * alto - v_alto / 2.0))
+        x0 = min(max(0, x0), ancho - v_ancho)
+        y0 = min(max(0, y0), alto - v_alto)
+        return x0, y0, v_ancho, v_alto
+
+    def _recortar_zoom(self, frame: np.ndarray) -> np.ndarray:
+        """Devuelve la ventana de zoom del cuadro (una vista, sin copiar)."""
+        alto, ancho = frame.shape[:2]
+        if self._ventana_zoom is None:
+            self._ventana_zoom = self._calcular_ventana_zoom(ancho, alto)
+            x0, y0, v_ancho, v_alto = self._ventana_zoom
+            _log.info(
+                "Zoom %.2f: ventana de %dx%d en (%d, %d) sobre un cuadro de %dx%d",
+                self.zoom, v_ancho, v_alto, x0, y0, ancho, alto,
+            )
+        x0, y0, v_ancho, v_alto = self._ventana_zoom
+        return frame[y0 : y0 + v_alto, x0 : x0 + v_ancho]
 
     def _leer_siguiente_jpeg(self) -> Optional[np.ndarray]:
         """
@@ -454,9 +535,10 @@ class CapturaVideo:
         return (
             f"CapturaVideo({self.CAPTURA_ANCHO}x{self.CAPTURA_ALTO}"
             f"->{self.ancho_objetivo}x{self.alto_objetivo}"
-            f"@{self.fps}fps, estado={estado}, "
+            f"@{self.fps}fps, zoom={self.zoom:.2f}, estado={estado}, "
             f"frames={self.frames_capturados})"
         )
 
 
 __all__ = ["CapturaVideo", "ErrorCaptura"]
+

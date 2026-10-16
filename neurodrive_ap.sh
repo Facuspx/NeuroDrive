@@ -113,7 +113,7 @@ estado() {
         echo "AP ACTIVO ($SSID_NAME)"
         echo "Canal: $(nmcli -g 802-11-wireless.channel con show $CON_NAME)"
         echo "IP de la Pi: $(nmcli -g IP4.ADDRESS device show $WIFI_IFACE | head -1)"
-        echo "Dispositivos conectados (la pulsera deberia aparecer):"
+        echo "Dispositivos conectados:"
         ip neigh show dev "$WIFI_IFACE" | grep -v FAILED || echo "  (ninguno todavia)"
     else
         echo "AP NO activo."
